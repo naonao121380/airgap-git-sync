@@ -1,0 +1,44 @@
+# ---------- 同步产物 ----------
+# bundle、更新包、校验文件，都在本地生成，不入库
+*.bundle
+*.bundle.sha256
+c-update-*.tar.gz
+c-update-*.tar.gz.sha256
+sync-*.bundle
+
+# ---------- 个人配置 ----------
+# sync.sh 的机器级配置（含路径、U 盘挂载点）
+.sync.env
+*.local
+
+# ---------- 解压出来的备份目录 ----------
+_backup_*/
+*.preload-*
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ---------- 编辑器 / 系统 ----------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# ---------- 数据文件（本项目只放脚本和文档） ----------
+*.xlsx
+*.xls
+*.csv
+*.parquet
+*.feather
+*.pkl
+*.h5
+data/
+output/
