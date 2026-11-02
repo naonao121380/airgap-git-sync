@@ -1,6 +1,6 @@
 # 02 · 双端同步手册（A ↔ B）
 
-> 场景：两台机器网络不通，靠 **U 盘**搬东西，只同步 `dev` 一条分支。
+> 场景：两台机器网络不通，靠 **U 盘**搬东西，只同步一条分支（默认 `dev`，可切成 `uat` 等发布分支）。
 > 示例路径：A 端 `/srv/project`，B 端 `/data/project`，按你的实际路径替换。
 >
 > 前置：B 端已经有一个能用的 Gitea 和空仓库，见 [04 · 从零上线清单](04-bootstrap-checklist.md)。
@@ -46,7 +46,8 @@ echo 'SYNC_MEDIA=/media/usb' > ~/.sync.env
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `SYNC_BRANCH` | `dev` | 同步的分支 |
+| `SYNC_BRANCH` | `dev` | 同步的分支（B 端跟着它走） |
+| `SYNC_MERGE_INTO` | 同 `SYNC_BRANCH` | B 的提案合到哪个分支；同步发布分支时设成 `dev` |
 | `SYNC_MEDIA` | `/media/usb` | U 盘挂载点默认值 |
 | `SYNC_PERM` | `777` | 每次操作后刷成的权限；留空则跳过 chmod |
 | `SYNC_REPO` | — | 仓库路径，设了就能在任意目录执行脚本 |
@@ -97,6 +98,64 @@ U 盘上建两个文件夹，**永远不要混用**：
 
 不分开的话，U 盘里会同时躺着两边的包，`load` 自动挑"最新的那个"，很容易拿错方向。
 
+### 1.5 换同步分支：从 dev 改成 uat
+
+默认同步 `dev`。如果 B 端跑的是**发布版**、不希望跟着开发分支往前跑，把同步分支改成 `uat` 之类的发布分支。**两端都要改**。
+
+先确认 A 端本地有这条分支：
+
+```bash
+git branch uat origin/uat 2>/dev/null || git switch -c uat origin/uat
+```
+
+然后两端各写一行（A 和 B 都一样）：
+
+```bash
+cat >> ~/.sync.env <<'EOF'
+SYNC_BRANCH=uat
+SYNC_MERGE_INTO=dev
+EOF
+```
+
+`SYNC_MERGE_INTO` 决定 B 的修改落到哪个分支。**不要省这一行**，原因见下。
+
+#### 为什么不能只改 SYNC_BRANCH
+
+B 的提交是在 `uat` 基础上做的。如果直接合回 `uat`，`uat` 就会比 `dev` 多出只在测试环境里存在过的代码，而 `dev` 永远拿不到——下次从 `dev` 发布时这个修复就丢了。
+
+设了 `SYNC_MERGE_INTO=dev` 之后，A 端 `merge` 做的是**挑取**（cherry-pick）：只把 B 那几条提交搬到 `dev`，不把 `uat` 上一长串 `merge pull request` 记录拖进来。搬运完成后：
+
+```
+A: dev  ← B 的修复（cherry-pick）
+A: uat    还是发布版的样子
+```
+
+要让 B 真正用上这个修复，还要在 A 端走一次你平时的发布流程（`dev` → `uat` 的 PR），然后再 `pack`。B 端在等待期间继续待在 `b/xxx` 分支上，代码是新的，不影响测试。
+
+#### B 端换分支时要注意
+
+B 的 `uat` 一般比 `dev` 旧。切过去以后**工作区里的代码会退回发布版**，未跟踪的数据文件不受影响。
+
+```bash
+cd <仓库>
+git switch uat          # 如果本地没有：git switch -c uat origin/uat
+~/sync.sh status        # 确认 "同步 : 分支 uat，B 的提案落到 dev"
+```
+
+如果 B 上还留着早先同步过去的 `dev` 分支，建议删掉，免得有人在那儿改：
+
+```bash
+git branch -D dev
+```
+
+#### pack 不再要求先切分支
+
+A 平时在 `dev` 上干活，打包时**不用先切到 `uat`**——包是按分支引用取的，和当前所在分支无关。屏幕上会提示一句：
+
+```
+[!] 当前在 dev，本次打包的是 uat（dev 不受影响）
+```
+
 ---
 
 ## 2. 日常用法
@@ -146,7 +205,7 @@ git add -A && git commit -m "修了 xxx"  # 提交
 ```bash
 cd /srv/project
 ~/sync.sh load  /media/usb/toA          # 先把 B 的分支收进来
-~/sync.sh merge b/1030-修bug            # 合进 dev，并推回 A 的 Gitea
+~/sync.sh merge b/1030-修bug            # 合进 dev（或 SYNC_MERGE_INTO 指定的分支），并推回 Gitea
 ~/sync.sh pack  /media/usb/toB          # 打个新包带回 B
 ```
 
@@ -190,7 +249,7 @@ git branch -d b/1030-修bug              # 这个分支已经合过了，可以�
 | `sha256 不匹配` | U 盘拷贝中文件坏了 | 重拷一遍，不要硬来 |
 | `有 N 个文件改了但没提交` | 忘了 commit | `git add -A && git commit -m "说明"`，或 `git checkout -- .` 丢弃 |
 | `未跟踪文件将被覆盖，已改名备份` | 本地同名文件要被打包里的版本顶替 | **正常现象**，旧文件还在，名字后面加了 `.preload-时间` |
-| `两边都改过 dev，历史分叉了` | A、B 同时动了 dev | 按屏幕提示操作，或把输出发我 |
+| `两边都改过 XXX，历史分叉了` | A、B 同时动了同步分支 | 按屏幕提示操作，或把输出发我 |
 | `快进失败，上面是 git 的原话` | 少见，通常是文件锁 | 关掉 Jupyter 里正在跑的任务再试 |
 | `推送超时或失败` | 本机 Gitea 没起来 / 网络断 | **可以忽略**，不影响两端同步 |
 | `当前目录不在 git 仓库里` | 没 cd 到仓库 | 先 `cd` 到仓库目录 |
@@ -200,7 +259,7 @@ git branch -d b/1030-修bug              # 这个分支已经合过了，可以�
 
 ## 5. 三条规矩（记不住别的，记这三条）
 
-1. **B 端改代码，先 `~/sync.sh branch <名字>`。** 直接改 dev 会让两边历史打架。
+1. **B 端改代码，先 `~/sync.sh branch <名字>`。** 直接改同步分支会让两边历史打架。
 2. **合并（`merge`）只在 A 端做。**
 3. **U 盘分 `toA` / `toB` 两个目录**，别混。
 
@@ -224,8 +283,8 @@ git branch -d b/1030-修bug              # 这个分支已经合过了，可以�
 
 ## 7. 技术备忘（出问题时给维护的人看）
 
-- 脚本用 `git bundle` 传输，只打包 `dev` 和 `b/*` 分支，不含 `refs/remotes/*`（Gitea 会拒）
+- 脚本用 `git bundle` 传输，只打包同步分支和 `b/*` 分支，不含 `refs/remotes/*`（Gitea 会拒）
 - 导包时 fetch 到 `refs/remotes/peer/*`，不污染本地分支
 - 快进前会扫描"将被覆盖但本地未纳管"的文件，改名成 `.preload-<时间戳>` 保留
-- `pack` 只允许在 `dev` 或 `b/*` 分支上执行
+- `pack` 按分支引用打包，与当前所在分支无关；当前若不在同步分支上会提示一句，并跳过工作区干净检查
 - 全程不 `push --force`，不改写历史

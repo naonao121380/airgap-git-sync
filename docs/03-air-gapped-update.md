@@ -102,6 +102,9 @@ echo "alias cpkg='~/make-update-package.sh -r /srv/project -o ~/Desktop'" >> ~/.
 ~/make-update-package.sh -r <仓库> -b uat -o /tmp
 ```
 
+> 如果 A↔B 那边已经改用 `uat` 作为同步分支，C 端也用同一个分支，出包时记得 `-b uat`，
+> 否则 B 和 C 会跑在两个不同版本的代码上。别名的写法同上去掉分支参数、换成 `-b uat` 即可。
+
 老写法仍然能用（第一个参数是仓库目录就当仓库，否则当分支）：
 
 ```bash

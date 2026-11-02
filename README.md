@@ -78,11 +78,24 @@ B 端收结果：
 | `sync.sh pack [目录]` | 两端 | 打包当前仓库到 U 盘 |
 | `sync.sh load [包或目录]` | 两端 | 从 U 盘导入，自动选最新包 |
 | `sync.sh branch <名字>` | B 端 | 开 `b/<名字>` 提案分支 |
-| `sync.sh merge <分支>` | **只能 A 端** | 合并进 `dev` 并推送 |
+| `sync.sh merge <分支>` | **只能 A 端** | 合并进 `SYNC_MERGE_INTO`（默认同步分支）并推送 |
 | `sync.sh status` | 两端 | 看分支、远端、权限状态 |
 | `sync.sh fixperm` | 两端 | 单独把仓库权限刷成 777 |
 
 每次搬运都做三件事：**校验 sha256 → 快进/导入 → 刷权限**。
+
+### 跟着发布分支走
+
+B 端如果应该跑发布版而不是开发版，把同步分支换成 `uat`：
+
+```bash
+# 两端都写
+printf 'SYNC_BRANCH=uat\nSYNC_MERGE_INTO=dev\n' >> ~/.sync.env
+```
+
+`SYNC_MERGE_INTO` 是必须的：B 的修复在 `uat` 基础上做，直接合回 `uat` 会让修复永远进不了 `dev`，
+下次发布就丢了。设成 `dev` 后，A 端 `merge` 改用 cherry-pick，只挑 B 的那几条提交，
+不把发布分支上的 `merge pull request` 记录拖进开发主线。
 
 细节见 [docs/02-two-way-sync.md](docs/02-two-way-sync.md)。
 
@@ -219,7 +232,8 @@ python tools/test_notebook.py       # 模拟 C 端环境实测
 
 ## 已知限制
 
-- **只同步一条主线**（默认 `dev`）。要多条就改 `SYNC_BRANCH` 或扩展 `pack` 的 refspec
+- **只同步一条主线**（默认 `dev`）。B 端要跟发布版就设 `SYNC_BRANCH=uat`，
+  同时用 `SYNC_MERGE_INTO=dev` 把 B 的改动挑回开发主线（见 [02 · 1.5](docs/02-two-way-sync.md)）
 - **不搬数据文件**。更新包只含 git 提交过的代码，几 GB 数据集请单独用移动硬盘拷
 - **不搬 stash / reflog**。`bundle` 只带提交和引用
 - **C 端的改动回不来**。没有 git 就没有回流路径，别让 C 端当开发环境

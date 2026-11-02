@@ -7,9 +7,11 @@
 #        再导入对方的仓库。
 #
 #  设计要点：
-#    · 只同步一条分支（默认 dev），包小、不会跑偏
+#    · 只同步一条分支（默认 dev，可改成 uat 等发布分支），包小、不会跑偏
 #    · 合并只允许在 A 端做；B 端只能开 b/xxx 提案分支，
 #      否则两端各生成一个 merge commit，历史永久分叉
+#    · 同步分支和"合并落点"可以分开：B 跟着 uat 跑，
+#      但 B 的修改落回 dev（见 SYNC_MERGE_INTO）
 #    · 每次搬运都校验 sha256
 #    · 默认把仓库刷成 777 并关闭 filemode（适配容器/共享存储）
 #
@@ -21,7 +23,10 @@
 #    或 export SYNC_REPO=/path/to/repo 后在任意目录执行
 #
 #  环境变量（可写进 ~/.sync.env）：
-#    SYNC_BRANCH=dev        同步的分支
+#    SYNC_BRANCH=dev        同步的分支（B 端跟着它走）
+#    SYNC_MERGE_INTO=         A 端把 B 的提案合到哪个分支；默认与 SYNC_BRANCH 相同
+#                            设成 dev 时，B 的提交会被挑（cherry-pick）到 dev，
+#                            不会把同步分支上的合并记录带过去
 #    SYNC_MEDIA=/media/usb  U 盘挂载点默认值
 #    SYNC_PERM=777          每次操作后把仓库权限刷成这个值；留空则跳过
 # ============================================================
@@ -35,6 +40,7 @@ set -uo pipefail
 : "${SYNC_PERM:=777}"
 : "${SYNC_PUSH_TIMEOUT:=30}"
 BRANCH="$SYNC_BRANCH"
+MERGE_INTO="${SYNC_MERGE_INTO:-$BRANCH}"
 MEDIA="$SYNC_MEDIA"
 PERM="$SYNC_PERM"
 PEER="peer"
@@ -134,7 +140,7 @@ backup_untracked_conflicts() {
     [ "$n" -eq 0 ] || ok "共备份 $n 个冲突文件（后缀 .preload-时间）"
 }
 
-# 收集要打包的分支：dev + 所有 b/*
+# 收集要打包的分支：同步分支 + 所有 b/*
 collect_refs() {
     REFS=("$BRANCH")
     local b
@@ -154,12 +160,13 @@ cmd_pack() {
     sec "1. 检查"
     ensure_config
     ensure_branch
-    ensure_clean
     local cur; cur=$(git rev-parse --abbrev-ref HEAD)
     case "$cur" in
-        "$BRANCH"|b/*) ok "当前在 $cur，工作区干净" ;;
-        *) die "当前在分支 $cur。打包只能在 $BRANCH 或 b/* 分支上做：
-    git checkout $BRANCH" ;;
+        "$BRANCH"|b/*) ensure_clean; ok "当前在 $cur，工作区干净" ;;
+        *)  # 打包是按分支引用取的，与当前所在分支无关，
+            # 所以 A 在 dev 上干活时也能直接打包 uat
+            warn "当前在 $cur，本次打包的是 $BRANCH（$cur 不受影响）"
+            info "$cur 上没提交的改动不会进包" ;;
     esac
 
     sec "2. 打包"
@@ -279,7 +286,7 @@ cmd_load() {
     fi
 
     echo
-    ok "完成，现在 dev = $(git rev-parse --short "$BRANCH")"
+    ok "完成，现在 $BRANCH = $(git rev-parse --short "$BRANCH")"
     fixperm
 }
 
@@ -319,36 +326,77 @@ cmd_merge() {
         die "找不到分支 $src（$ME status 看看有哪些）"
     fi
 
-    git checkout "$BRANCH" >/dev/null 2>&1 || die "切不到 $BRANCH"
+    local target="$MERGE_INTO"
+    git rev-parse --verify --quiet "refs/heads/$target" >/dev/null \
+        || die "本地没有分支 $target（SYNC_MERGE_INTO 指向它）
+  缺这个分支就先建：git branch $target origin/$target"
+
+    git checkout "$target" >/dev/null 2>&1 || die "切不到 $target"
     ensure_clean
 
-    sec "合并 $src → $BRANCH"
-    if git merge --no-ff "$ref" -m "merge $src into $BRANCH" >/dev/null 2>&1; then
-        ok "已合并：$(git log -1 --format='%h %s')"
-    elif [ -n "$(git ls-files -u)" ]; then
-        warn "有冲突，需要手工解决："
-        git diff --name-only --diff-filter=U | sed 's/^/        /'
-        echo
-        info "用编辑器改完这些文件，然后："
-        info "  git add -A"
-        info "  git commit -m \"解决冲突\""
-        info "  git push origin $BRANCH"
-        echo
-        die "先解决冲突"
+    if [ "$target" = "$BRANCH" ]; then
+        sec "合并 $src → $target"
+        if git merge --no-ff "$ref" -m "merge $src into $target" >/dev/null 2>&1; then
+            ok "已合并：$(git log -1 --format='%h %s')"
+        elif [ -n "$(git ls-files -u)" ]; then
+            warn "有冲突，需要手工解决："
+            git diff --name-only --diff-filter=U | sed 's/^/        /'
+            echo
+            info "用编辑器改完这些文件，然后："
+            info "  git add -A"
+            info "  git commit -m \"解决冲突\""
+            info "  git push origin $target"
+            echo
+            die "先解决冲突"
+        else
+            die "合并失败（不是冲突导致），把上面的报错贴出来"
+        fi
     else
-        die "合并失败（不是冲突导致），把上面的报错贴出来"
+        # 同步分支（如 uat）与合并落点（如 dev）不同：
+        # 只挑 B 自己新加的提交，避免把 uat 那一串 merge commit 拖进 dev
+        local list n
+        list=$(git rev-list --reverse --no-merges "$ref" --not "refs/heads/$BRANCH")
+        if [ -z "$list" ]; then
+            warn "$src 相对 $BRANCH 没有新提交，跳过"
+        else
+            n=$(printf '%s\n' "$list" | wc -l | tr -d ' ')
+            sec "挑取 $src 的 $n 个提交 → $target"
+            git log --oneline --no-merges "$ref" --not "refs/heads/$BRANCH" | sed 's/^/        /'
+            echo
+            if git cherry-pick $list >/dev/null 2>&1; then
+                ok "已挑入：$(git log -1 --format='%h %s')"
+            elif [ -n "$(git ls-files -u)" ]; then
+                warn "有冲突，需要手工解决："
+                git diff --name-only --diff-filter=U | sed 's/^/        /'
+                echo
+                info "改完这些文件，然后："
+                info "  git add -A"
+                info "  git cherry-pick --continue"
+                info "不想继续就回滚： git cherry-pick --abort"
+                echo
+                die "先解决冲突"
+            else
+                die "挑取失败（不是冲突导致），把上面的报错贴出来"
+            fi
+        fi
     fi
 
     if git remote get-url origin >/dev/null 2>&1; then
-        if timeout "$SYNC_PUSH_TIMEOUT" git push origin "$BRANCH" >/dev/null 2>&1; then
-            ok "已推送 origin/$BRANCH"
+        if timeout "$SYNC_PUSH_TIMEOUT" git push origin "$target" >/dev/null 2>&1; then
+            ok "已推送 origin/$target"
         else
             warn "推送超时或失败，可稍后手动 git push"
         fi
     fi
 
     echo
-    info "下一步：$ME pack 打包给 B"
+    if [ "$target" != "$BRANCH" ]; then
+        info "B 的改动现在在 $target，还没进 $BRANCH"
+        info "要让 B 用上，先在 A 上把 $target 合并进 $BRANCH（走你平时的 PR 流程）"
+        info "然后再：$ME pack"
+    else
+        info "下一步：$ME pack 打包给 B"
+    fi
     echo
     fixperm
 }
@@ -360,6 +408,7 @@ cmd_status() {
     info "分支 : $(git rev-parse --abbrev-ref HEAD)"
     info "提交 : $(git log -1 --format='%h %s' 2>/dev/null)"
     info "远端 : $(git remote get-url origin 2>/dev/null || echo '（无）')"
+    info "同步 : 分支 $BRANCH，B 的提案落到 $MERGE_INTO"
     info "权限 : ${PERM:-（不处理）}    filemode=$(git config core.filemode || echo '未设')"
 
     sec "本地分支"
@@ -382,20 +431,22 @@ cmd_status() {
 # ================= usage =================
 usage() {
     cat <<EOF
-$ME — A/B 双端代码同步（只同步 dev）
+$ME — 两台不通网的机器之间同步代码（当前同步分支：$BRANCH，合并落点：$MERGE_INTO）
 
-  $ME pack   [目录]      打包当前仓库到 U 盘（默认 /media/usb）
+  $ME pack   [目录]      打包当前仓库到 U 盘（默认 $MEDIA）
   $ME load   [包或目录]   从 U 盘导入，自动选最新包
   $ME branch <名字>       开工作分支 b/<名字>（B 端改代码前必做）
-  $ME merge  <分支>       把 b/xxx 合进 dev（A 端做）
+  $ME merge  <分支>       把 b/xxx 合进 $MERGE_INTO（A 端做）
   $ME status              看当前状态
-  $ME fixperm             把整个仓库权限刷成 777
+  $ME fixperm             把整个仓库权限刷成 $PERM
 
 日常：
   A 改完  → A: $ME pack   →  B: $ME load
   B 要改  → B: $ME branch 1030-fix → 改代码 → commit → $ME pack
           → A: $ME load → $ME merge b/1030-fix → $ME pack
           → B: $ME load
+
+改同步分支：在本机 ~/.sync.env 里写 SYNC_BRANCH=uat（两端都要改）。
 EOF
 }
 
