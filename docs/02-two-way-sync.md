@@ -136,13 +136,22 @@ A: uat    还是发布版的样子
 
 B 的 `uat` 一般比 `dev` 旧。切过去以后**工作区里的代码会退回发布版**，未跟踪的数据文件不受影响。
 
+B 上通常还没有 `uat` 这条分支，**不用手工建**——把 A 新打的包 `load` 一次，脚本会自动从包里建出来并切过去：
+
 ```bash
 cd <仓库>
-git switch uat          # 如果本地没有：git switch -c uat origin/uat
-~/sync.sh status        # 确认 "同步 : 分支 uat，B 的提案落到 dev"
+~/sync.sh load /media/usb/toB      # 看到「已新建本地分支 uat」就对了
+~/sync.sh status                   # 确认 "同步 : 分支 uat，B 的提案落到 dev"
 ```
 
-如果 B 上还留着早先同步过去的 `dev` 分支，建议删掉，免得有人在那儿改：
+屏幕上会先提示一句 `本地还没有 uat，下面会从包里建`，然后：
+
+```
+[OK] 已新建本地分支 uat = 36e91e3 Merge pull request 'Dev' into uat
+[OK] 已推送 origin/uat
+```
+
+B 上如果还留着早先同步过去的 `dev` 分支，建议删掉，免得有人在那儿改：
 
 ```bash
 git branch -D dev

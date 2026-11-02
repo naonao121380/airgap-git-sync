@@ -205,7 +205,12 @@ cmd_pack() {
 resolve_pkg() {
     local src="${1:-$MEDIA}" p
     if [ -d "$src" ]; then
-        p=$(ls -t "$src"/sync-*.bundle 2>/dev/null | head -1)
+        # 包名末尾自带 YYYYMMDD-HHMMSS，按它排比 mtime 可靠：
+        # 同一秒内连打两个包时 mtime 会打平，ls -t 的顺序就不确定了
+        p=$(ls -1 "$src"/sync-*.bundle 2>/dev/null \
+            | awk -F'-' '{print $(NF-1)"-"$NF" "$0}' \
+            | sort | tail -1 | cut -d' ' -f2-)
+        [ -n "$p" ] || p=$(ls -t "$src"/sync-*.bundle 2>/dev/null | head -1)
         [ -n "$p" ] || die "目录里没有 sync-*.bundle：$src"
         # 提示必须走 stderr，否则会被 $(...) 当成路径的一部分
         printf '      自动选中最新包：%s\n' "$(basename "$p")" >&2
@@ -235,11 +240,14 @@ cmd_load() {
 
     sec "2. 检查本地"
     ensure_config
-    ensure_branch
     ensure_clean
-    local cur; cur=$(git rev-parse --abbrev-ref HEAD)
-    [ "$cur" = "$BRANCH" ] || { git checkout "$BRANCH" >/dev/null 2>&1 || die "切不到 $BRANCH"; }
-    ok "当前在 $BRANCH，工作区干净"
+    if git rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
+        local cur; cur=$(git rev-parse --abbrev-ref HEAD)
+        [ "$cur" = "$BRANCH" ] || { git checkout "$BRANCH" >/dev/null 2>&1 || die "切不到 $BRANCH"; }
+        ok "当前在 $BRANCH，工作区干净"
+    else
+        info "本地还没有 $BRANCH，下面会从包里建"
+    fi
 
     sec "3. 读入包里的分支"
     git fetch "$bundle" "+refs/heads/*:refs/remotes/$PEER/*" "+refs/tags/*:refs/tags/*" >/dev/null 2>&1 \
@@ -251,6 +259,12 @@ cmd_load() {
     local rsrc="refs/remotes/$PEER/$BRANCH"
     if ! git rev-parse --verify --quiet "$rsrc" >/dev/null; then
         warn "包里没有 $BRANCH，跳过"
+    elif ! git rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
+        # 第一次导入，或刚换了同步分支：本机还没有这条分支，直接从包里建
+        backup_untracked_conflicts "$rsrc"
+        git checkout -b "$BRANCH" "$rsrc" >/dev/null 2>&1 \
+            || die "从包里新建 $BRANCH 失败（工作区可能有冲突文件，先处理再重跑）"
+        ok "已新建本地分支 $BRANCH = $(git log -1 --format='%h %s' "$BRANCH")"
     elif git merge-base --is-ancestor "$rsrc" "refs/heads/$BRANCH"; then
         ok "本地 $BRANCH 已包含包里的全部提交，无需更新"
     elif git merge-base --is-ancestor "refs/heads/$BRANCH" "$rsrc"; then
