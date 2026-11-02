@@ -24,9 +24,9 @@
 #
 #  环境变量（可写进 ~/.sync.env）：
 #    SYNC_BRANCH=dev        同步的分支（B 端跟着它走）
-#    SYNC_MERGE_INTO=         A 端把 B 的提案合到哪个分支；默认与 SYNC_BRANCH 相同
-#                            设成 dev 时，B 的提交会被挑（cherry-pick）到 dev，
-#                            不会把同步分支上的合并记录带过去
+#    SYNC_MERGE_INTO=dev    A 端把 B 的提案合到哪个分支，默认同 SYNC_BRANCH；
+#                           设成 dev 时 B 的提交会被挑（cherry-pick）过去，
+#                           不会把同步分支上的合并记录带进 dev
 #    SYNC_MEDIA=/media/usb  U 盘挂载点默认值
 #    SYNC_PERM=777          每次操作后把仓库权限刷成这个值；留空则跳过
 # ============================================================
@@ -107,8 +107,9 @@ ensure_config() {
 }
 
 ensure_branch() {
-    git rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null \
-        || die "本地没有分支 $BRANCH（git branch -a 看一下）"
+    git rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || die "本地没有分支 $BRANCH
+  远端有的话先建一个：git branch $BRANCH origin/$BRANCH
+  或者把 ~/.sync.env 里的 SYNC_BRANCH 改成这台机器上实际存在的分支"
 }
 
 ensure_clean() {
