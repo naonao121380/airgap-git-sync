@@ -202,6 +202,32 @@ remote_branches() {
 
 has_remote() { git remote get-url "$REMOTE" >/dev/null 2>&1; }
 
+# ---------- 收包中转引用（refs/remotes/peer/*）----------
+# 只在 load 解包的过程中用得到：先把包里的分支读进 peer/*，再逐条判断。
+# 判断完就没用了——本地分支已经指向同样的提交，删掉不会丢东西。
+# 所以 pack/load 正常结束时顺手清掉，免得越攒越多，`git branch -a` 里一堆噪音。
+peer_count() {
+    git for-each-ref --format='x' "refs/remotes/$PEER" 2>/dev/null | wc -l | tr -d ' '
+}
+
+prune_peer() {
+    if [ "${SYNC_KEEP_PEER:-0}" = "1" ]; then
+        info "SYNC_KEEP_PEER=1，保留 refs/remotes/$PEER/*（共 $(peer_count) 条）"
+        return 0
+    fi
+    local refs n=0 r
+    refs=$(git for-each-ref --format='%(refname)' "refs/remotes/$PEER" 2>/dev/null || true)
+    [ -n "$refs" ] || return 0
+    while IFS= read -r r; do
+        [ -n "$r" ] || continue
+        git update-ref -d "$r" 2>/dev/null && n=$((n+1))
+    done <<EOF
+$refs
+EOF
+    [ "$n" -gt 0 ] && ok "已清理 $n 条收包中转引用（refs/remotes/$PEER/*）"
+    return 0
+}
+
 # ---------- 权限：统一 777，并让 git 无视权限位 ----------
 fixperm() {
     [ -n "$PERM" ] || { info "已跳过权限修正（SYNC_PERM 为空）"; return 0; }
@@ -538,6 +564,10 @@ cmd_pack() {
     info "对面执行：$ME load <拷贝到的目录或那个 .bundle>"
     echo
 
+    # 上次收包（或中途停下的那次）留下的中转引用，顺手清掉
+    [ "$(peer_count)" -gt 0 ] && nxt "清理收包中转引用"
+    prune_peer
+
     fixperm
 }
 
@@ -638,6 +668,7 @@ cmd_load() {
         echo
         info "自己合完再重跑本命令："
         info "  git checkout <分支> && git rebase $PEER/<分支>"
+        info "（包里的那份留在 refs/remotes/$PEER/*，这次故意不清；重跑成功后会清掉）"
         echo
         die "有分支分叉，已停下（没有改动任何东西）"
     fi
@@ -717,6 +748,10 @@ cmd_load() {
         info "没有 $REMOTE，跳过推送"
     fi
 
+    # 包里的分支已经落到本地分支上，peer/* 用完即弃
+    [ "$(peer_count)" -gt 0 ] && nxt "清理收包中转引用"
+    prune_peer
+
     echo
     ok "完成，当前分支 $(current_branch) = $(git rev-parse --short HEAD 2>/dev/null)"
     fixperm
@@ -759,6 +794,24 @@ cmd_branch() {
 }
 
 # ============================================================
+#  clean（清掉收包中转引用）
+# ============================================================
+cmd_clean() {
+    ensure_no_operation
+    local n; n=$(peer_count)
+    if [ "$n" -eq 0 ]; then
+        ok "本来就没有 refs/remotes/$PEER/*，不用清"
+        return 0
+    fi
+    info "refs/remotes/$PEER/* 现在有 $n 条："
+    git for-each-ref --format='%(refname:short)|%(objectname:short)' "refs/remotes/$PEER" \
+        | awk -F'|' '{printf "        %-28s %s\n", $1, $2}'
+    echo
+    info "这只是收包时的中转引用，本地分支已经指向同样的提交，删掉不会丢东西"
+    prune_peer
+}
+
+# ============================================================
 #  status（只读）
 # ============================================================
 cmd_status() {
@@ -777,6 +830,8 @@ cmd_status() {
     fi
     info "停留 : ${TARGET:-（未定）}${BRANCH:+  ← SYNC_BRANCH 指定}"
     info "权限 : ${PERM:-（不处理）}    filemode=$(git config core.filemode || echo '未设')"
+    local pn; pn=$(peer_count)
+    [ "$pn" -gt 0 ] && info "中转 : refs/remotes/$PEER/* 有 $pn 条（收包剩下的，$ME clean 可清）"
 
     # 只 fetch 不改分支，让下面的 ahead/behind 是新的
     local fetched=0
@@ -863,6 +918,7 @@ $head
   $ME load   [包或目录]    收下对面的包，逐分支快进（默认从 $MEDIA 找最新包）
   $ME status              看状态（只读）
   $ME branch <名字>        开工作分支 b/<名字> 并切过去
+  $ME clean               清掉收包中转引用 refs/remotes/$PEER/*（pack/load 结束会自动清）
   $ME fixperm             $fixline
   $ME -r <仓库> <命令>      临时指定仓库目录
 
@@ -883,6 +939,7 @@ $head
   SYNC_REMOTE=origin         远端名
   SYNC_ALLOW_LOCAL_AHEAD=1   本地领先远端也照常继续（默认停下）
   SYNC_SKIP_REMOTE=1         完全不碰远端（纯离线）
+  SYNC_KEEP_PEER=1           保留收包中转引用 refs/remotes/$PEER/*（排查问题时用）
 EOF
 }
 
@@ -926,6 +983,7 @@ case "$CMDNAME" in
     load|l)     shift; cmd_load   "$@" ;;
     branch)     shift; cmd_branch "$@" ;;
     status|s)   cmd_status ;;
+    clean|c)    cmd_clean ;;
     fixperm|f)  fixperm ;;
     "")         usage ;;
     merge|m)

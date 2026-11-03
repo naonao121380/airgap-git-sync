@@ -126,6 +126,7 @@ cd /srv/project/models          # 甚至可以在子目录里跑
 | `sync.sh load [包或目录]` | 收下包，逐分支快进（默认从 `SYNC_MEDIA` 找最新包） |
 | `sync.sh status` | 看状态（只读，不改任何东西） |
 | `sync.sh branch <名字>` | 开工作分支 `b/<名字>` 并切过去 |
+| `sync.sh clean` | 清掉收包中转引用 `refs/remotes/peer/*`（`pack`/`load` 结束会自动清） |
 | `sync.sh fixperm` | 单独把仓库权限刷成 `SYNC_PERM` |
 | `sync.sh -r <仓库> <命令>` | 临时指定仓库目录 |
 

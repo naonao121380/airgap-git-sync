@@ -192,7 +192,7 @@ git switch feature/xxx        # 看完切回来
 | 把包读成本地分支 | `git fetch --prune x.bundle "+refs/heads/*:refs/remotes/peer/*"` | `sync.sh load` |
 | 把某分支对到包里那版 | `git merge --ff-only peer/dev` | `sync.sh load` |
 | 把本地提交接到包里那版后面 | `git rebase peer/dev` | —— |
-| 清掉上次收包留下的引用 | `git update-ref -d refs/remotes/peer/dev` | 下次 `load` 会重建 |
+| 清掉上次收包留下的引用 | `git update-ref -d refs/remotes/peer/dev` | `sync.sh clean`（`pack`/`load` 结束会自动清） |
 | 把更新推给本机 Gitea | `git push origin dev` | `sync.sh load` 结束时自动做 |
 
 **分叉之后的标准动作**（两边都改过同一分支时）：

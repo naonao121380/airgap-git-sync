@@ -105,6 +105,7 @@ EOF
 | `SYNC_REMOTE` | `origin` | 远端名 |
 | `SYNC_ALLOW_LOCAL_AHEAD` | `0` | 设 `1` 时本地领先也照常继续 |
 | `SYNC_SKIP_REMOTE` | `0` | 设 `1` 时完全不碰远端（纯离线） |
+| `SYNC_KEEP_PEER` | `0` | 设 `1` 时保留收包中转引用 `refs/remotes/peer/*`（排查问题用，平时不用管） |
 
 变量名**必须带 `SYNC_` 前缀**。写成 `BRANCH=dev` 不会报错，只会静默按默认值跑；脚本启动时会扫出来点给你看。
 
@@ -218,6 +219,7 @@ git push origin b/1103-修bug
 | 开工作分支 | `sync.sh branch 1103-xxx` |
 | 让工作分支能被打包 | `git push origin b/1103-xxx` |
 | 看状态 | `sync.sh status` |
+| 清掉收包残留的 `remotes/peer/*` | `sync.sh clean`（一般不用管，`pack`/`load` 结束会自己清） |
 | 只刷权限 | `sync.sh fixperm` |
 | 换台机器没 cd 过来 | `sync.sh -r /data/project pack /media/usb/toB` |
 | 忘命令了 | `sync.sh` |
@@ -392,6 +394,8 @@ git merge  --continue    # 或 --abort
 - 没有远端可用时退化为 `git bundle create --all`，并打印提示
 - `load` = `git fetch --prune <bundle> "+refs/heads/*:refs/remotes/peer/*"`，先取到 `peer/*` 再逐分支判断，不直接覆盖。
   `peer` 只是引用命名空间，**不是 git remote**，`git remote -v` 看不到它，`git branch -a` 里会显示成 `remotes/peer/dev`
+- `peer/*` 用完即弃：分支落到本地分支之后，`load`/`pack` 结束会自动删掉（`SYNC_KEEP_PEER=1` 可保留，`sync.sh clean` 可手动清）。
+  唯一例外是**报分叉停下时故意保留**——提示里的 `git rebase peer/<分支>` 要用它，重跑成功后才清
 - 非当前分支用 `git update-ref` 挪指针，工作区零改动；当前分支用 `git merge --ff-only`，工作区跟着更新
 - 快进前扫描"会被覆盖但本地未纳管"的文件，改名成 `.preload-<时间戳>` 保留，不删除
 - 全程不 `push --force`；`load` 结束时只对**更新过/新建过**的分支做普通 push（都是快进）
