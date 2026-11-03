@@ -594,7 +594,10 @@ cmd_load() {
     sync_remote
 
     nxt "读入包里的分支"
-    git fetch "$bundle" "+refs/heads/*:refs/remotes/$PEER/*" "+refs/tags/*:refs/tags/*" >/dev/null 2>&1 \
+    # --prune：让 refs/remotes/peer/* 严格等于包里的分支集合。
+    # 不加的话，对面删掉或不再打包的分支会一直挂着旧引用，
+    # 既占空间，也会让"包里到底有什么"的判断失真。
+    git fetch --prune "$bundle" "+refs/heads/*:refs/remotes/$PEER/*" "+refs/tags/*:refs/tags/*" >/dev/null 2>&1 \
         || die "从包里取引用失败"
     local pkg_list
     # %(refname:short) 会带上远端名（peer/dev），这里剥掉前缀只留分支名

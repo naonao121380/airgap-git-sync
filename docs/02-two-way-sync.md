@@ -390,7 +390,8 @@ git merge  --continue    # 或 --abort
 - 对齐时会把"远端有、本地没有"的分支用 `git branch --track` 建成同名本地分支，保证打包范围 ⊇ 远端分支
 - `pack` = `git bundle create <file> <远端存在的 refs/heads/* 逐个列出> --tags`；不含 `refs/remotes/*`（Gitea 会拒收），也不含本地独有分支
 - 没有远端可用时退化为 `git bundle create --all`，并打印提示
-- `load` = `git fetch <bundle> "+refs/heads/*:refs/remotes/peer/*"`，先取到 `peer/*` 再逐分支判断，不直接覆盖
+- `load` = `git fetch --prune <bundle> "+refs/heads/*:refs/remotes/peer/*"`，先取到 `peer/*` 再逐分支判断，不直接覆盖。
+  `peer` 只是引用命名空间，**不是 git remote**，`git remote -v` 看不到它，`git branch -a` 里会显示成 `remotes/peer/dev`
 - 非当前分支用 `git update-ref` 挪指针，工作区零改动；当前分支用 `git merge --ff-only`，工作区跟着更新
 - 快进前扫描"会被覆盖但本地未纳管"的文件，改名成 `.preload-<时间戳>` 保留，不删除
 - 全程不 `push --force`；`load` 结束时只对**更新过/新建过**的分支做普通 push（都是快进）
