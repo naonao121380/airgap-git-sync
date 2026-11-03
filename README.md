@@ -69,7 +69,7 @@ B 端收结果：
   ~/sync.sh load /media/usb/toB
 ```
 
-脚本带护栏：B 端如果在 `dev` 上有本地提交，`status` 报警、`export` 直接拒绝并给出搬运命令。
+脚本带护栏：B 端改代码前用 `branch` 开提案分支；`merge` 只在 A 端执行；同步分支上出现本地提交时，`load` 会停下来并给出搬运命令，不会硬覆盖。
 
 ## 六条命令
 
@@ -97,7 +97,11 @@ printf 'SYNC_BRANCH=uat\nSYNC_MERGE_INTO=dev\n' >> ~/.sync.env
 下次发布就丢了。设成 `dev` 后，A 端 `merge` 改用 cherry-pick，只挑 B 的那几条提交，
 不把发布分支上的 `merge pull request` 记录拖进开发主线。
 
-细节见 [docs/02-two-way-sync.md](docs/02-two-way-sync.md)。
+这种模式下 B 端要改代码，流程不变——`branch` 开提案分支，改完 `pack`，A 端 `merge` 落到 `dev`，
+等把 `dev` 发布到 `uat` 后再 `pack` 回 B。要是 B 这时正停在提案分支上收到新包，
+`load` 只更新 `uat` 的指针，不会把你切走、也不会动工作区里的文件。
+
+细节见 [docs/02-two-way-sync.md](docs/02-two-way-sync.md) 的 1.5 / 1.6 节。
 
 ---
 

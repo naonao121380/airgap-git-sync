@@ -37,7 +37,9 @@ set -uo pipefail
 [ -f "$HOME/.sync.env" ] && . "$HOME/.sync.env"
 : "${SYNC_BRANCH:=dev}"
 : "${SYNC_MEDIA:=/media/usb}"
-: "${SYNC_PERM:=777}"
+# 用 "-" 而不是 ":-"：写成 SYNC_PERM= （空串）才是真的"不处理权限"，
+# 用 ":-" 时空串也会被换成 777，与文档承诺的行为不符
+: "${SYNC_PERM-777}"
 : "${SYNC_PUSH_TIMEOUT:=30}"
 BRANCH="$SYNC_BRANCH"
 MERGE_INTO="${SYNC_MERGE_INTO:-$BRANCH}"
@@ -241,10 +243,20 @@ cmd_load() {
     sec "2. 检查本地"
     ensure_config
     ensure_clean
+    local cur on_side=0
+    cur=$(git rev-parse --abbrev-ref HEAD)
+    # 人在提案分支 b/xxx 上时，不去 checkout 同步分支：
+    # 否则工作区会整体退回发布版，看起来像"我改的东西没了"
+    case "$cur" in b/*) on_side=1 ;; esac
     if git rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
-        local cur; cur=$(git rev-parse --abbrev-ref HEAD)
-        [ "$cur" = "$BRANCH" ] || { git checkout "$BRANCH" >/dev/null 2>&1 || die "切不到 $BRANCH"; }
-        ok "当前在 $BRANCH，工作区干净"
+        if [ "$cur" = "$BRANCH" ]; then
+            ok "当前在 $BRANCH，工作区干净"
+        elif [ "$on_side" = 1 ]; then
+            info "当前在提案分支 $cur，下面只更新 $BRANCH，工作区保持原样"
+        else
+            git checkout "$BRANCH" >/dev/null 2>&1 || die "切不到 $BRANCH"
+            ok "当前在 $BRANCH，工作区干净"
+        fi
     else
         info "本地还没有 $BRANCH，下面会从包里建"
     fi
@@ -261,19 +273,33 @@ cmd_load() {
         warn "包里没有 $BRANCH，跳过"
     elif ! git rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
         # 第一次导入，或刚换了同步分支：本机还没有这条分支，直接从包里建
-        backup_untracked_conflicts "$rsrc"
-        git checkout -b "$BRANCH" "$rsrc" >/dev/null 2>&1 \
-            || die "从包里新建 $BRANCH 失败（工作区可能有冲突文件，先处理再重跑）"
-        ok "已新建本地分支 $BRANCH = $(git log -1 --format='%h %s' "$BRANCH")"
+        if [ "$on_side" = 1 ]; then
+            # 人在提案分支上：只建引用，工作区一个字节都不动
+            git update-ref "refs/heads/$BRANCH" "$rsrc" || die "从包里新建 $BRANCH 失败"
+            ok "已新建本地分支 $BRANCH = $(git log -1 --format='%h %s' "$BRANCH")"
+            info "工作区仍在 $cur，文件没有被动过"
+        else
+            backup_untracked_conflicts "$rsrc"
+            git checkout -b "$BRANCH" "$rsrc" >/dev/null 2>&1 \
+                || die "从包里新建 $BRANCH 失败（工作区可能有冲突文件，先处理再重跑）"
+            ok "已新建本地分支 $BRANCH = $(git log -1 --format='%h %s' "$BRANCH")"
+        fi
     elif git merge-base --is-ancestor "$rsrc" "refs/heads/$BRANCH"; then
         ok "本地 $BRANCH 已包含包里的全部提交，无需更新"
     elif git merge-base --is-ancestor "refs/heads/$BRANCH" "$rsrc"; then
-        backup_untracked_conflicts "$rsrc"
-        if ! git merge --ff-only "$rsrc" >/tmp/mars-merge.err 2>&1; then
-            sed 's/^/      /' /tmp/mars-merge.err
-            die "快进失败，上面是 git 的原话"
+        if [ "$on_side" = 1 ]; then
+            git update-ref "refs/heads/$BRANCH" "$rsrc" || die "更新 $BRANCH 失败"
+            ok "已更新 $BRANCH = $(git log -1 --format='%h %s' "$BRANCH")"
+            info "你在 $cur 上，工作区没动"
+            info "要把新代码合进当前分支：git rebase $BRANCH"
+        else
+            backup_untracked_conflicts "$rsrc"
+            if ! git merge --ff-only "$rsrc" >/tmp/sync-merge.err 2>&1; then
+                sed 's/^/      /' /tmp/sync-merge.err
+                die "快进失败，上面是 git 的原话"
+            fi
+            ok "已快进到 $(git log -1 --format='%h %s' "$BRANCH")"
         fi
-        ok "已快进到 $(git log -1 --format='%h %s' "$BRANCH")"
     else
         warn "两边都改过 $BRANCH，历史分叉了，不能自动处理"
         info "本地独有提交："
@@ -282,8 +308,12 @@ cmd_load() {
         git log --oneline "$BRANCH..$rsrc" | head -5 | sed 's/^/        /'
         echo
         info "如果这些本地提交本该在分支上，先挪走再重跑："
-        info "  $ME branch 暂存-$(date +%m%d)"
-        info "  git reset --hard $PEER/$BRANCH"
+        if [ "$on_side" = 1 ]; then
+            info "  git update-ref refs/heads/$BRANCH $PEER/$BRANCH   # 你在 $cur 上，工作区不受影响"
+        else
+            info "  $ME branch 暂存-$(date +%m%d)"
+            info "  git reset --hard $PEER/$BRANCH"
+        fi
         info "  $ME load"
         echo
         die "分叉未处理"
@@ -317,9 +347,19 @@ cmd_branch() {
     ensure_config
     git rev-parse --verify --quiet "refs/heads/$name" >/dev/null \
         && die "分支 $name 已存在，换个名字，或直接：git checkout $name"
-    git checkout "$BRANCH" >/dev/null 2>&1 || die "切不到 $BRANCH"
+    # 已经在提案分支上就不再跳回同步分支，直接接着开，免得丢上下文
+    local cur base
+    cur=$(git rev-parse --abbrev-ref HEAD)
+    base="$BRANCH"
+    case "$cur" in
+        b/*) base="$cur"; info "接着当前的 $cur 往下开（已含它上面的提交）" ;;
+    esac
+    if [ "$cur" != "$base" ]; then
+        ensure_clean
+        git checkout "$base" >/dev/null 2>&1 || die "切不到 $base"
+    fi
     git checkout -b "$name" >/dev/null 2>&1 || die "建分支失败"
-    ok "已切到 $name，现在可以改代码"
+    ok "已切到 $name（基于 $base），现在可以改代码"
     info "改完提交：git add -A && git commit -m \"说明\""
     info "然后打包：$ME pack"
     fixperm

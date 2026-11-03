@@ -167,6 +167,87 @@ A 平时在 `dev` 上干活，打包时**不用先切到 `uat`**——包是按�
 
 ---
 
+### 1.6 B 端在 uat 上要开发怎么办
+
+B 端现在停在 `uat`。**不要在 `uat` 上直接改**——`uat` 是发布版本，两边同时往它上面加提交，历史会分叉，而且改动永远进不了 `dev`。
+
+规矩和 `dev` 模式完全一样，只有一处不同：**你的改动会落到 `dev`，而不是 `uat`。**
+
+#### 完整一圈
+
+**B 端（改代码）**
+
+```bash
+cd <仓库>
+~/sync.sh branch 1103-修bug          # ① 从 uat 开提案分支 b/1103-修bug
+# ... 改代码 ...
+git add -A && git commit -m "修了 xxx"   # ② 提交
+~/sync.sh pack /media/usb/toA          # ③ 打包给 A
+```
+
+**A 端（收下并落地）**
+
+```bash
+cd /srv/project
+~/sync.sh load  /media/usb/toA         # ④ 收包（B 的分支进 refs/remotes/peer/）
+~/sync.sh merge b/1103-修bug           # ⑤ 挑取到 dev（注意：不是 uat）
+# ⑥ 照你平时的发布流程，把 dev 合进 uat（PR）
+~/sync.sh pack  /media/usb/toB         # ⑦ 打包回 B
+```
+
+**B 端（收结果）**
+
+```bash
+~/sync.sh load /media/usb/toB          # ⑧ uat 更新，工作区跟着变
+git branch -d b/1103-修bug             # ⑨ 这个分支已经进 uat 了，可以删
+```
+
+`merge` 那一步屏幕上会明说落点：
+
+```
+  挑取 b/1103-修bug 的 1 个提交 → dev
+        41d485c B 修了 bug
+[OK] 已挑入：cb5fef5 B 修了 bug
+
+      B 的改动现在在 dev，还没进 uat
+      要让 B 用上，先在 A 上把 dev 合并进 uat（走你平时的 PR 流程）
+```
+
+#### 三个必须知道的点
+
+**① 改动先进 `dev`，再靠发版回到 `uat`。**
+第 ⑤ 步之后，`dev` 上有你的提交，`uat` 上没有。中间这段时间，B 的 `b/xxx` 分支就是"最新代码"，测试照跑，不受影响。等第 ⑥ 步发版完成，`uat` 才会带上这个修复。
+
+**② 在 `b/xxx` 上收到新包，不会被踢回 `uat`。**
+`load` 检测到你在提案分支上，只更新 `uat` 这条分支指针，**工作区一个字节都不动**：
+
+```
+      当前在提案分支 b/1103-修bug，下面只更新 uat，工作区保持原样
+[OK] 已更新 uat = 19f544a A 又更新 uat
+      你在 b/1103-修bug 上，工作区没动
+      要把新代码合进当前分支：git rebase uat
+```
+
+想让 A 的新代码也进到你手上，就照提示跑一次 `git rebase uat`。有冲突的话 git 会停下让你改，改完 `git add -A && git rebase --continue`；想放弃就 `git rebase --abort`。
+
+**③ `uat` 比 `dev` 旧，冲突只能 A 端解。**
+B 是在发布版基础上改的。如果 A 在 `dev` 上已经动过同一批文件，第 ⑤ 步挑取会冲突：
+
+```
+[!] 有冲突，需要手工解决：
+        models/xxx.py
+      改完这些文件，然后：
+        git add -A
+        git cherry-pick --continue
+      不想继续就回滚： git cherry-pick --abort
+```
+
+改完继续即可。**不在 A 端解，B 端没法解**——`b/xxx` 上的代码是对的，只是和 `dev` 的最新版要碰一下。
+
+> 小改动（一两个文件、改配置、调参数）走这条路很顺。要动大块逻辑、或者要连着开发好几天，建议临时把两端都切回 `dev`（改 `~/.sync.env` 里的 `SYNC_BRANCH=dev`），开发完再切回 `uat`，这样一直在最新代码上改，不会被 `uat` 的旧版本拖住。
+
+---
+
 ## 2. 日常用法
 
 ### 场景一：A 改了代码，同步给 B（最常用）
@@ -199,7 +280,7 @@ cd /data/project
 
 ### 场景二：B 改了代码，回传给 A
 
-**B 端**（先开分支，别在 dev 上改）：
+**B 端**（先开分支，别在同步分支上改）：
 
 ```bash
 cd /data/project
@@ -208,6 +289,8 @@ cd /data/project
 git add -A && git commit -m "修了 xxx"  # 提交
 ~/sync.sh pack /media/usb/toA
 ```
+
+> 如果同步的是 `uat`（`SYNC_BRANCH=uat`），这一步完全一样，只是 `merge` 会把你的提交挑到 `dev` 而不是 `uat`。详见前面的 [1.6 节](#16-b-端在-uat-上要开发怎么办)。
 
 **A 端**：
 
@@ -284,6 +367,7 @@ git branch -d b/1030-修bug              # 这个分支已经合过了，可以�
 | 收对面包 | A | `~/sync.sh load /media/usb/toA` |
 | 开分支改代码 | B | `~/sync.sh branch 1030-xxx` |
 | 合并 B 的改动 | A | `~/sync.sh merge b/1030-xxx` |
+| 让 A 的新代码进当前分支 | B | `git rebase uat`（或 `dev`） |
 | 看状态 | 两台都行 | `~/sync.sh status` |
 | 只刷权限 | 两台都行 | `~/sync.sh fixperm` |
 | 忘命令了 | 两台都行 | `~/sync.sh` |
