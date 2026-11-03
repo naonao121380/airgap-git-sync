@@ -97,11 +97,16 @@ printf 'SYNC_BRANCH=uat\nSYNC_MERGE_INTO=dev\n' >> ~/.sync.env
 下次发布就丢了。设成 `dev` 后，A 端 `merge` 改用 cherry-pick，只挑 B 的那几条提交，
 不把发布分支上的 `merge pull request` 记录拖进开发主线。
 
+注意这是**本机配置**：脚本不区分 A/B，`merge` 落到哪完全取决于执行它的那台机器的 `~/.sync.env`。
+B 端写了不影响 A 端，**两端都要写**；变量名漏掉 `SYNC_` 前缀（写成 `MERGE_INTO=dev`）不会报错，
+只会静默回落到同步分支——新版脚本会把这个点出来，落点可疑时 `merge` 直接停下。
+用 `~/sync.sh status` 可以随时确认「B 的提案落到 xxx」是不是 dev。
+
 这种模式下 B 端要改代码，流程不变——`branch` 开提案分支，改完 `pack`，A 端 `merge` 落到 `dev`，
 等把 `dev` 发布到 `uat` 后再 `pack` 回 B。要是 B 这时正停在提案分支上收到新包，
 `load` 只更新 `uat` 的指针，不会把你切走、也不会动工作区里的文件。
 
-细节见 [docs/02-two-way-sync.md](docs/02-two-way-sync.md) 的 1.5 / 1.6 节。
+细节见 [docs/02-two-way-sync.md](docs/02-two-way-sync.md) 的 0.1 / 1.5 / 1.6 节。
 
 ---
 

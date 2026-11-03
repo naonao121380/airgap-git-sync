@@ -34,19 +34,41 @@
 set -uo pipefail
 
 # ---------- 配置 ----------
-[ -f "$HOME/.sync.env" ] && . "$HOME/.sync.env"
+ENV_FILE="$HOME/.sync.env"
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+
+# 变量名漏了 SYNC_ 前缀（写成 MERGE_INTO=dev）时，source 不会报错、
+# 脚本也读不到，会静默按默认值跑——这是最难查的一类配置问题。
+# 这里先把它挑出来，下面每个命令开头都提醒一次。
+ENV_TYPOS=""
+for _k in BRANCH MEDIA PERM REPO MERGE_INTO PUSH_TIMEOUT; do
+    _bad="$_k"; _good="SYNC_$_k"
+    if [ -n "${!_bad:-}" ] && [ -z "${!_good:-}" ]; then
+        ENV_TYPOS="$ENV_TYPOS  $_bad=${!_bad}"
+    fi
+done
+unset _k _bad _good
+
 : "${SYNC_BRANCH:=dev}"
 : "${SYNC_MEDIA:=/media/usb}"
 # 用 "-" 而不是 ":-"：写成 SYNC_PERM= （空串）才是真的"不处理权限"，
 # 用 ":-" 时空串也会被换成 777，与文档承诺的行为不符
 : "${SYNC_PERM-777}"
 : "${SYNC_PUSH_TIMEOUT:=30}"
+: "${SYNC_ALLOW_MERGE_TO_RELEASE:=0}"
 BRANCH="$SYNC_BRANCH"
 MERGE_INTO="${SYNC_MERGE_INTO:-$BRANCH}"
 MEDIA="$SYNC_MEDIA"
 PERM="$SYNC_PERM"
 PEER="peer"
 ME=$(basename "$0")
+
+# 同步的是发布分支（uat/main），却没设 SYNC_MERGE_INTO：
+# 此时 B 的改动会直接落到发布分支上，dev 永远拿不到
+MERGE_TO_RELEASE=0
+if [ "$MERGE_INTO" = "$BRANCH" ] && [ "$BRANCH" != "dev" ]; then
+    MERGE_TO_RELEASE=1
+fi
 
 # ---------- 定位仓库（脚本本身不放进仓库，避免被同步覆盖）----------
 resolve_repo() {
@@ -80,6 +102,15 @@ warn() { printf '%s[!]%s %s\n'    "$C_NO" "$C_0" "$*"; }
 die()  { printf '%s[停]%s %s\n'   "$C_ER" "$C_0" "$*"; echo; exit 1; }
 hr()   { printf -- '------------------------------------------------------------\n'; }
 sec()  { echo; hr; echo "  $*"; hr; }
+
+# ~/.sync.env 里变量名写错时（漏 SYNC_ 前缀）在每个命令开头提醒一次
+warn_env_typo() {
+    [ -n "$ENV_TYPOS" ] || return 0
+    warn "$ENV_FILE 里有变量名漏了 SYNC_ 前缀，脚本读不到："
+    info "$ENV_TYPOS"
+    info "要写成 SYNC_xxx=... 才生效，本次按默认值跑"
+    echo
+}
 
 # ---------- 权限：统一 777，并让 git 无视权限位 ----------
 fixperm() {
@@ -386,6 +417,20 @@ cmd_merge() {
         || die "本地没有分支 $target（SYNC_MERGE_INTO 指向它）
   缺这个分支就先建：git branch $target origin/$target"
 
+    # 落点 = 同步分支本身，而同步的又是发布分支：说明 SYNC_MERGE_INTO 没生效。
+    # 这时候合下去，B 的改动会留在发布版上、dev 拿不到，下次发版就被盖掉。
+    if [ "$MERGE_TO_RELEASE" = 1 ] && [ "$SYNC_ALLOW_MERGE_TO_RELEASE" != "1" ]; then
+        warn "这次会把 $src 直接合进 $target —— $target 就是 B 端在跟的发布分支"
+        info "B 的改动会停在发布版上，dev 永远拿不到，下次发版就被覆盖"
+        echo
+        info "本意是「B 跟发布版跑、改动回 dev」的话，在 $ENV_FILE 写一行："
+        info "  SYNC_MERGE_INTO=dev"
+        echo
+        info "确实要合进 $target，就显式放行："
+        info "  SYNC_ALLOW_MERGE_TO_RELEASE=1"
+        die "合并落点可疑，已停下（没有改动任何东西）"
+    fi
+
     git checkout "$target" >/dev/null 2>&1 || die "切不到 $target"
     ensure_clean
 
@@ -463,7 +508,15 @@ cmd_status() {
     info "分支 : $(git rev-parse --abbrev-ref HEAD)"
     info "提交 : $(git log -1 --format='%h %s' 2>/dev/null)"
     info "远端 : $(git remote get-url origin 2>/dev/null || echo '（无）')"
+    if [ -f "$ENV_FILE" ]; then
+        info "配置 : $ENV_FILE"
+    else
+        info "配置 : $ENV_FILE（不存在，全部用默认值）"
+    fi
     info "同步 : 分支 $BRANCH，B 的提案落到 $MERGE_INTO"
+    if [ "$MERGE_TO_RELEASE" = 1 ]; then
+        warn "B 的提案会直接合进 $BRANCH —— 想让改动回 dev，就写 SYNC_MERGE_INTO=dev"
+    fi
     info "权限 : ${PERM:-（不处理）}    filemode=$(git config core.filemode || echo '未设')"
 
     sec "本地分支"
@@ -504,6 +557,8 @@ $ME — 两台不通网的机器之间同步代码（当前同步分支：$BRANC
 改同步分支：在本机 ~/.sync.env 里写 SYNC_BRANCH=uat（两端都要改）。
 EOF
 }
+
+warn_env_typo
 
 case "${1:-}" in
     pack|p)     shift; cmd_pack   "$@" ;;
