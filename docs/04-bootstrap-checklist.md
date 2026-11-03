@@ -206,17 +206,42 @@ Gitea 新建空库时默认分支名常是 `main`，而我们只推了 `dev`，�
 
 ## 阶段 3 · 装同步脚本
 
+脚本放**仓库外面**的固定目录，配置就放它旁边：
+
 ```bash
-cp sync.sh ~/sync.sh
-chmod +x ~/sync.sh
-cd ~/myproject && ~/sync.sh status
+mkdir -p /devsdb/git-sync
+cp sync.sh /devsdb/git-sync/sync.sh
+chmod +x /devsdb/git-sync/sync.sh
 ```
 
-**✅ 通过标准**：输出里能看到
+写配置（B 端）：
+
+```bash
+cat > /devsdb/git-sync/.sync.env <<'EOF'
+SYNC_ROLE=B
+SYNC_BRANCH=dev
+SYNC_MERGE_INTO=dev
+SYNC_REPO=/data/project
+SYNC_MEDIA=/media/usb
+EOF
+```
+
+自检：
+
+```bash
+/devsdb/git-sync/sync.sh status
+```
+
+**✅ 通过标准**：输出里能看到这三行
 
 ```
-权限 : 777  filemode=false
+      角色 : B
+      同步 : 分支 dev，B 的提案落到 dev
+      权限 : 777    filemode=false
 ```
+
+`角色` 空着说明 `SYNC_ROLE` 没读进去；`落点` 不是 `dev` 说明 `SYNC_MERGE_INTO` 没生效
+（原因通常是配置文件放错位置，或者变量名漏了 `SYNC_` 前缀）。
 
 之后日常操作见 [02 · 双端同步](02-two-way-sync.md)。
 
@@ -224,7 +249,8 @@ cd ~/myproject && ~/sync.sh status
 
 ## 三条铁律
 
-1. **B 端永远不在 `dev` 上直接改代码。** 要改就开 `b/1030-修个bug` 这种分支，由 A 端合并。
+1. **B 端永远不在同步分支上直接改代码。** 要改就开 `b/1103-修个bug` 这种分支，由 A 端合并。
+   （同步 `uat` 时同理：在 `uat` 上直接改会绕过 `dev`，写 `SYNC_ROLE=B` 时 `pack` 会直接拦住。）
 2. **合并只在 A 端做。** 两边都 merge 会生成两个不同 sha 的合并提交，历史永久分叉，再也对不上。
 3. **每次搬代码都带 sha256 校验。** 别直接拷文件夹，别信"应该没坏"。
 

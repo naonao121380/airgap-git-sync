@@ -34,7 +34,11 @@
 set -uo pipefail
 
 # ---------- 配置 ----------
-ENV_FILE="$HOME/.sync.env"
+# env 文件跟脚本放同一个目录，脚本搬走配置就跟着走
+_src="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR=$(cd "$(dirname "$_src")" 2>/dev/null && pwd) || SCRIPT_DIR="."
+unset _src
+ENV_FILE="$SCRIPT_DIR/.sync.env"
 [ -f "$ENV_FILE" ] && . "$ENV_FILE"
 
 # 变量名漏了 SYNC_ 前缀（写成 MERGE_INTO=dev）时，source 不会报错、
@@ -51,11 +55,21 @@ unset _k _bad _good
 
 : "${SYNC_BRANCH:=dev}"
 : "${SYNC_MEDIA:=/media/usb}"
-# 用 "-" 而不是 ":-"：写成 SYNC_PERM= （空串）才是真的"不处理权限"，
-# 用 ":-" 时空串也会被换成 777，与文档承诺的行为不符
-: "${SYNC_PERM-777}"
 : "${SYNC_PUSH_TIMEOUT:=30}"
 : "${SYNC_ALLOW_MERGE_TO_RELEASE:=0}"
+# 这台机器是谁：A（合并方，有 dev/uat 全部分支）或 B（跟随方，只有同步分支）。
+# 留空则不做角色校验，靠人工约定——出问题时最难查的就是这个，建议都写上。
+: "${SYNC_ROLE:=}"
+
+# SYNC_PERM 要区分两种"空"：
+#   没写这一行   → 默认 777
+#   写成 SYNC_PERM= → 空串，表示不处理权限
+# set -u 下不能用 ${VAR-default}（它只取默认值、不给变量赋值，下一行读就报 unbound），
+# 所以用 +x 判断"到底设置过没有"
+if [ -z "${SYNC_PERM+x}" ]; then
+    SYNC_PERM=777
+fi
+
 BRANCH="$SYNC_BRANCH"
 MERGE_INTO="${SYNC_MERGE_INTO:-$BRANCH}"
 MEDIA="$SYNC_MEDIA"
@@ -69,6 +83,18 @@ MERGE_TO_RELEASE=0
 if [ "$MERGE_INTO" = "$BRANCH" ] && [ "$BRANCH" != "dev" ]; then
     MERGE_TO_RELEASE=1
 fi
+
+# 角色归一化：A/a → A，B/b → B，其余留空表示"不校验"
+case "$SYNC_ROLE" in
+    a|A|A端|甲方) ROLE=A ;;
+    b|B|B端|乙方) ROLE=B ;;
+    *)           ROLE="" ;;
+esac
+
+# 当前分支名；空仓库（还没有任何提交）时返回空串而不是让 git 报错
+current_branch() {
+    git rev-parse --abbrev-ref HEAD 2>/dev/null || true
+}
 
 # ---------- 定位仓库（脚本本身不放进仓库，避免被同步覆盖）----------
 resolve_repo() {
@@ -105,6 +131,11 @@ sec()  { echo; hr; echo "  $*"; hr; }
 
 # ~/.sync.env 里变量名写错时（漏 SYNC_ 前缀）在每个命令开头提醒一次
 warn_env_typo() {
+    if [ ! -f "$ENV_FILE" ] && [ -f "$HOME/.sync.env" ]; then
+        warn "配置还在老位置 $HOME/.sync.env，本版只读脚本目录的 $ENV_FILE"
+        info "搬一下就好： mv $HOME/.sync.env $ENV_FILE"
+        echo
+    fi
     [ -n "$ENV_TYPOS" ] || return 0
     warn "$ENV_FILE 里有变量名漏了 SYNC_ 前缀，脚本读不到："
     info "$ENV_TYPOS"
@@ -158,6 +189,17 @@ ensure_clean() {
 
 sha256_of() { sha256sum "$1" | awk '{print $1}'; }
 
+# 列出"这次会被写进工作区"的文件（NUL 分隔，直接喂给 while read）
+list_incoming() {
+    local target="$1"
+    if git rev-parse --verify --quiet HEAD >/dev/null; then
+        git diff --name-only -z "$target" HEAD 2>/dev/null
+    else
+        # 空仓库（还没有第一次提交）：包里所有文件都算"将被覆盖"
+        git ls-tree -r --name-only -z "$target" 2>/dev/null
+    fi
+}
+
 # 快进前：把"会被新版本覆盖、但本地还没纳管"的文件改名备份（不删除）
 backup_untracked_conflicts() {
     local target="$1" f n=0
@@ -170,7 +212,7 @@ backup_untracked_conflicts() {
                 n=$((n+1))
             fi
         fi
-    done < <(git diff --name-only -z "$target" HEAD 2>/dev/null)
+    done < <(list_incoming "$target")
     [ "$n" -eq 0 ] || ok "共备份 $n 个冲突文件（后缀 .preload-时间）"
 }
 
@@ -194,7 +236,25 @@ cmd_pack() {
     sec "1. 检查"
     ensure_config
     ensure_branch
-    local cur; cur=$(git rev-parse --abbrev-ref HEAD)
+
+    # B 端不该在同步分支上攒提交：回传到 A 就等于直接改了发布版
+    if [ "$ROLE" = "B" ] && git rev-parse --verify --quiet "refs/remotes/$PEER/$BRANCH" >/dev/null; then
+        local n
+        n=$(git rev-list --count "refs/remotes/$PEER/$BRANCH..refs/heads/$BRANCH")
+        if [ "${n:-0}" -gt 0 ]; then
+            warn "同步分支 $BRANCH 上有 $n 个本地新提交（不是从 A 收到的）："
+            git log --oneline "refs/remotes/$PEER/$BRANCH..refs/heads/$BRANCH" | head -3 | sed 's/^/        /'
+            info "这样打包回 A，等于直接改掉 $BRANCH（发布版），dev 拿不到这些改动"
+            echo
+            info "把它们挪到提案分支再打包（顺序别乱）："
+            info "  git checkout $BRANCH                  # 先站到同步分支上"
+            info "  git branch b/$(date +%m%d)-补丁        # 就地建分支，不切换，提交跟着过去"
+            info "  git reset --hard $PEER/$BRANCH        # 同步分支退回 A 收到时的样子"
+            echo
+            die "同步分支被直接改过，已停下（提交都还在，没丢）"
+        fi
+    fi
+    local cur; cur=$(current_branch)
     case "$cur" in
         "$BRANCH"|b/*) ensure_clean; ok "当前在 $cur，工作区干净" ;;
         *)  # 打包是按分支引用取的，与当前所在分支无关，
@@ -275,7 +335,7 @@ cmd_load() {
     ensure_config
     ensure_clean
     local cur on_side=0
-    cur=$(git rev-parse --abbrev-ref HEAD)
+    cur=$(current_branch)
     # 人在提案分支 b/xxx 上时，不去 checkout 同步分支：
     # 否则工作区会整体退回发布版，看起来像"我改的东西没了"
     case "$cur" in b/*) on_side=1 ;; esac
@@ -380,7 +440,7 @@ cmd_branch() {
         && die "分支 $name 已存在，换个名字，或直接：git checkout $name"
     # 已经在提案分支上就不再跳回同步分支，直接接着开，免得丢上下文
     local cur base
-    cur=$(git rev-parse --abbrev-ref HEAD)
+    cur=$(current_branch)
     base="$BRANCH"
     case "$cur" in
         b/*) base="$cur"; info "接着当前的 $cur 往下开（已含它上面的提交）" ;;
@@ -402,6 +462,13 @@ cmd_merge() {
     [ -n "$src" ] || die "用法：$ME merge <分支>
   例：$ME merge b/1030-修bug
   也可以：$ME merge $PEER/b/1030-修bug"
+
+    if [ "$ROLE" = "B" ]; then
+        die "这台机器是 B 端（SYNC_ROLE=B），merge 只能在 A 端做
+  B 端的动作是：$ME branch <名字>  →  改代码  →  git commit  →  $ME pack
+  如果确实在 B 端合并，把 $ENV_FILE 里的 SYNC_ROLE 删掉或改成 A"
+    fi
+
     ensure_config
     local ref=""
     if git rev-parse --verify --quiet "refs/heads/$src" >/dev/null; then
@@ -505,7 +572,7 @@ cmd_merge() {
 cmd_status() {
     sec "仓库"
     info "路径 : $REPO"
-    info "分支 : $(git rev-parse --abbrev-ref HEAD)"
+    info "分支 : $(current_branch || echo '（还没有提交）')"
     info "提交 : $(git log -1 --format='%h %s' 2>/dev/null)"
     info "远端 : $(git remote get-url origin 2>/dev/null || echo '（无）')"
     if [ -f "$ENV_FILE" ]; then
@@ -513,6 +580,7 @@ cmd_status() {
     else
         info "配置 : $ENV_FILE（不存在，全部用默认值）"
     fi
+    info "角色 : ${ROLE:-未设置（A/B 不校验）}"
     info "同步 : 分支 $BRANCH，B 的提案落到 $MERGE_INTO"
     if [ "$MERGE_TO_RELEASE" = 1 ]; then
         warn "B 的提案会直接合进 $BRANCH —— 想让改动回 dev，就写 SYNC_MERGE_INTO=dev"
@@ -539,22 +607,36 @@ cmd_status() {
 # ================= usage =================
 usage() {
     cat <<EOF
-$ME — 两台不通网的机器之间同步代码（当前同步分支：$BRANCH，合并落点：$MERGE_INTO）
+$ME — 两台不通网的机器之间同步代码
+  本机角色：${ROLE:-未设置}    同步分支：$BRANCH    合并落点：$MERGE_INTO
+  配置文件：$ENV_FILE
 
   $ME pack   [目录]      打包当前仓库到 U 盘（默认 $MEDIA）
   $ME load   [包或目录]   从 U 盘导入，自动选最新包
-  $ME branch <名字>       开工作分支 b/<名字>（B 端改代码前必做）
-  $ME merge  <分支>       把 b/xxx 合进 $MERGE_INTO（A 端做）
+  $ME branch <名字>       开提案分支 b/<名字>（B 端改代码前必做）
+  $ME merge  <分支>       把 b/xxx 合进 $MERGE_INTO（只能在 A 端）
   $ME status              看当前状态
   $ME fixperm             把整个仓库权限刷成 $PERM
 
-日常：
-  A 改完  → A: $ME pack   →  B: $ME load
-  B 要改  → B: $ME branch 1030-fix → 改代码 → commit → $ME pack
-          → A: $ME load → $ME merge b/1030-fix → $ME pack
-          → B: $ME load
+每台机器的 $ENV_FILE 里写清自己是谁：
 
-改同步分支：在本机 ~/.sync.env 里写 SYNC_BRANCH=uat（两端都要改）。
+  A 端：  SYNC_ROLE=A        B 端：  SYNC_ROLE=B
+          SYNC_BRANCH=uat            SYNC_BRANCH=uat
+          SYNC_MERGE_INTO=dev        SYNC_MERGE_INTO=dev
+          SYNC_REPO=/srv/project     SYNC_REPO=/data/project
+          SYNC_MEDIA=/media/usb      SYNC_MEDIA=/media/usb
+
+日常（每一步一条命令）：
+  A 改了代码        A: $ME pack /media/usb/toB
+                    B: $ME load /media/usb/toB
+  B 要改代码        B: $ME branch 1103-fix
+                    B: git add -A && git commit -m "说明"
+                    B: $ME pack /media/usb/toA
+                    A: $ME load /media/usb/toA
+                    A: $ME merge b/1103-fix
+                    A:（走你的 PR，把 dev 合进 uat）
+                    A: $ME pack /media/usb/toB
+                    B: $ME load /media/usb/toB
 EOF
 }
 

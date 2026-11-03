@@ -89,22 +89,28 @@ B 端收结果：
 B 端如果应该跑发布版而不是开发版，把同步分支换成 `uat`：
 
 ```bash
-# 两端都写
-printf 'SYNC_BRANCH=uat\nSYNC_MERGE_INTO=dev\n' >> ~/.sync.env
+# 两端都写（配置文件固定读脚本所在目录的 .sync.env）
+printf 'SYNC_ROLE=B\nSYNC_BRANCH=uat\nSYNC_MERGE_INTO=dev\n' >> ~/.sync.env
 ```
 
 `SYNC_MERGE_INTO` 是必须的：B 的修复在 `uat` 基础上做，直接合回 `uat` 会让修复永远进不了 `dev`，
 下次发布就丢了。设成 `dev` 后，A 端 `merge` 改用 cherry-pick，只挑 B 的那几条提交，
 不把发布分支上的 `merge pull request` 记录拖进开发主线。
 
-注意这是**本机配置**：脚本不区分 A/B，`merge` 落到哪完全取决于执行它的那台机器的 `~/.sync.env`。
+注意这是**本机配置**：`merge` 落到哪完全取决于执行它的那台机器的 `.sync.env`。
 B 端写了不影响 A 端，**两端都要写**；变量名漏掉 `SYNC_` 前缀（写成 `MERGE_INTO=dev`）不会报错，
 只会静默回落到同步分支——新版脚本会把这个点出来，落点可疑时 `merge` 直接停下。
-用 `~/sync.sh status` 可以随时确认「B 的提案落到 xxx」是不是 dev。
 
-这种模式下 B 端要改代码，流程不变——`branch` 开提案分支，改完 `pack`，A 端 `merge` 落到 `dev`，
-等把 `dev` 发布到 `uat` 后再 `pack` 回 B。要是 B 这时正停在提案分支上收到新包，
-`load` 只更新 `uat` 的指针，不会把你切走、也不会动工作区里的文件。
+写了 `SYNC_ROLE`（`A` / `B`）之后还有三道校验：B 端跑 `merge` 直接拒绝、B 端在同步分支上
+攒了提交时 `pack` 直接拒绝、落点等于发布分支本身时 `merge` 直接拒绝。
+用 `~/sync.sh status` 可以随时确认「角色」和「B 的提案落到 xxx」。
+
+> **B 端要改代码时，建议把两端都切成 `SYNC_BRANCH=dev`。** `uat` 落后 `dev`，
+> 在 `uat` 上改的东西回传时几乎必然冲突（同一个文件同一位置两边都动过）。
+
+确实要在 `uat` 模式下改（小补丁）的话：`branch` 开提案分支 → 改 → `pack` → A 端 `merge` 落到 `dev`
+→ 把 `dev` 发布到 `uat` → `pack` 回 B。B 停在提案分支上收到新包时，`load` 只更新 `uat` 的指针，
+不会把你切走、也不会动工作区里的文件。
 
 细节见 [docs/02-two-way-sync.md](docs/02-two-way-sync.md) 的 0.1 / 1.5 / 1.6 节。
 
