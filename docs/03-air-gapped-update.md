@@ -102,7 +102,7 @@ echo "alias cpkg='~/make-update-package.sh -r /srv/project -o ~/Desktop'" >> ~/.
 ~/make-update-package.sh -r <仓库> -b uat -o /tmp
 ```
 
-> `-b` 决定 C 端拿到哪个分支的代码。功能一现在会把**所有分支**同步到对面，
+> `-b` 决定 C 端拿到哪个分支的代码。功能一会把**两端 Gitea 上存在的所有分支**都同步过去，
 > 所以 B 和 C 不必强行用同一条分支；但两边跑的结果要对得上，就用同一个 `-b` 值（默认 `dev`）。
 
 老写法仍然能用（第一个参数是仓库目录就当仓库，否则当分支）：

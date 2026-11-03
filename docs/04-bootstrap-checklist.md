@@ -141,6 +141,9 @@ cd /tmp && sha256sum fromA-$B.bundle > fromA-$B.bundle.sha256 && cat fromA-$B.bu
 
 > `git bundle create` 不会因为工作区有未跟踪文件报错，那些文件本来也不进包。
 
+> 这里是**手工**搬运（`sync.sh` 还没装上），所以 `--all` 全带走。装好脚本以后规则会变严：
+> `sync.sh pack` 只打「本机 Gitea 上存在的分支」，本地独有的分支不进包 —— 想让哪条分支过去，先 `git push`。
+
 ### 2.2 拷到 U 盘
 
 同一目录，**不要改名、不要解压**：

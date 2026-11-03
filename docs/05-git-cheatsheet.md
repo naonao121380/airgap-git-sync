@@ -185,7 +185,8 @@ git switch feature/xxx        # 看完切回来
 
 | 我想 | 直接用 git | 用脚本 |
 |---|---|---|
-| 打全量包 | `git bundle create x.bundle --all` | `sync.sh pack /media/usb/toB` |
+| 打全量包 | `git bundle create x.bundle --all` | `sync.sh pack /media/usb/toB`（只打远端存在的分支） |
+| 只打几条分支 | `git bundle create x.bundle refs/heads/dev refs/heads/uat --tags` | 推上去，让远端有它 |
 | 看包里有什么 | `git bundle list-heads x.bundle` | —— |
 | 校验包 | `git bundle verify x.bundle` | `sync.sh load` 会自动做 |
 | 把包读成本地分支 | `git fetch x.bundle "+refs/heads/*:refs/remotes/peer/*"` | `sync.sh load` |

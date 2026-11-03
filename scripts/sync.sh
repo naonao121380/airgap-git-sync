@@ -10,7 +10,9 @@
 #         落后     → 自动快进（等于 pull）
 #         领先     → 停下等人处理（提交还没进远端，直接搬会把远端搞乱）
 #         已分叉   → 停下等人处理
-#    2. pack：git bundle --all，把全部本地分支和标签打成一个文件
+#    2. pack：只打包【远端存在的】分支 + 标签
+#         本地有、远端没有的分支不进包（要先 push 上去）
+#         远端有、本地没有的分支会先拉下来，再一起打包
 #    3. load：把包里所有分支逐个对到本地，能快进就快进，分叉就停
 #    4. 结束时停回你运行前所在的分支；env 里设了 SYNC_BRANCH 就停在它上面
 #
@@ -19,7 +21,7 @@
 #  配置文件永远跟着脚本走：<脚本所在目录>/.sync.env
 #
 #  用法：
-#      sync.sh pack  /media/usb/toB     # 打包给对面
+#      sync.sh pack  /media/usb/toB     # 打包给对面（只含远端存在的分支）
 #      sync.sh load  /media/usb/toB     # 收下对面的包
 #      sync.sh status                   # 看状态（只读，不改任何东西）
 #      sync.sh branch 1103-修bug         # 开工作分支 b/1103-修bug
@@ -113,7 +115,7 @@ warn_env_notes() {
     if [ -n "$ENV_DEPRECATED" ]; then
         warn "$ENV_FILE 里还有旧模型的变量，新版不读了，可以删掉："
         info "$ENV_DEPRECATED"
-        info "新模式不分 A/B，所有分支一起同步，不需要角色和合并落点"
+        info "新模式不分 A/B，只同步远端存在的分支，不需要角色和合并落点"
         echo
     fi
 }
@@ -135,12 +137,12 @@ locate() {
 resolve_repo() {
     local d
     if [ -n "$OPT_REPO" ]; then
-        d="${OPT_REPO%/}"
+        d=$(abspath "${OPT_REPO%/}")
         [ -d "$d/.git" ] || [ -f "$d/.git" ] || die "指定的目录不是 git 仓库：$OPT_REPO"
         REPO="$d"; return 0
     fi
     if [ -n "${SYNC_REPO:-}" ]; then
-        d="${SYNC_REPO%/}"
+        d=$(abspath "${SYNC_REPO%/}")
         [ -d "$d/.git" ] || [ -f "$d/.git" ] || die "SYNC_REPO 不是 git 仓库：$SYNC_REPO
   改 $ENV_FILE 里那一行，或者直接传 -r /path/to/repo"
         REPO="$d"; return 0
@@ -154,6 +156,18 @@ resolve_repo() {
 }
 
 # ---------- git 小工具 ----------
+# 脚本会 cd 进仓库，所以用户敲的相对路径必须在 cd 之前就变成绝对路径，
+# 否则 "sync.sh pack ./usb" 这种写法会在仓库目录里找 ./usb
+ORIG_PWD="$PWD"
+abspath() {
+    case "$1" in
+        "")        printf '\n' ;;
+        /*)        printf '%s\n' "$1" ;;                       # Unix 绝对路径
+        [A-Za-z]:[\\/]*) printf '%s\n' "$1" ;;                 # Windows 盘符（Git Bash）
+        *)         printf '%s/%s\n' "${ORIG_PWD%/}" "$1" ;;
+    esac
+}
+
 # 当前分支名；空仓库（还没有提交）时 HEAD 是"未诞生分支"，这里也返回它的名字
 current_branch() { git symbolic-ref --short HEAD 2>/dev/null || true; }
 has_commit()     { git rev-parse --verify --quiet HEAD >/dev/null 2>&1; }
@@ -179,6 +193,14 @@ branch_state() {
 }
 
 local_branches() { git for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null; }
+
+# 远端有哪些分支（剥掉 refs/remotes/<remote>/ 前缀，去掉 HEAD）
+remote_branches() {
+    git for-each-ref --format='%(refname)' "refs/remotes/$REMOTE" 2>/dev/null \
+        | sed "s|^refs/remotes/$REMOTE/||" | grep -v '^HEAD$' || true
+}
+
+has_remote() { git remote get-url "$REMOTE" >/dev/null 2>&1; }
 
 # ---------- 权限：统一 777，并让 git 无视权限位 ----------
 fixperm() {
@@ -269,8 +291,13 @@ TARGET=""
 # 决定"同步结束后停在哪个分支"
 decide_target() {
     local t="$BRANCH"
-    [ -n "$t" ] || t="$ORIG_BRANCH"
-    printf '%s\n' "$t"
+    if [ -n "$t" ]; then printf '%s\n' "$t"; return 0; fi
+    # 空仓库里 HEAD 指向的是一个"还没诞生的分支"（master/main），
+    # 它并不真的存在，不能拿去 checkout，否则导入完就卡在这
+    if [ -n "$ORIG_BRANCH" ] \
+       && git rev-parse --verify --quiet "refs/heads/$ORIG_BRANCH" >/dev/null; then
+        printf '%s\n' "$ORIG_BRANCH"
+    fi
 }
 
 switch_to() {
@@ -318,7 +345,22 @@ sync_remote() {
     fi
     ok "已拉取远端引用"
 
-    local b st behind_list=() ahead_list=() diverged_list=() lonely_list=()
+    # 远端是唯一真相源：远端有、本地没有的分支，全部建成本地同名分支（跟远端一样新）
+    # 这样后面打包时，本地分支集合 ⊇ 远端分支集合，包里的内容永远等于远端的样子
+    local b st adopted=()
+    while IFS= read -r b; do
+        [ -n "$b" ] || continue
+        git rev-parse --verify --quiet "refs/heads/$b" >/dev/null && continue
+        if git branch --track "$b" "$REMOTE/$b" >/dev/null 2>&1 \
+           || git update-ref "refs/heads/$b" "refs/remotes/$REMOTE/$b" 2>/dev/null; then
+            adopted+=("$b")
+        fi
+    done < <(remote_branches)
+    if [ ${#adopted[@]} -gt 0 ]; then
+        ok "远端有、本地没有的分支，已拉下来：${adopted[*]}"
+    fi
+
+    local behind_list=() ahead_list=() diverged_list=() lonely_list=()
     while IFS= read -r b; do
         [ -n "$b" ] || continue
         st=$(branch_state "$b")
@@ -372,7 +414,14 @@ sync_remote() {
     fi
 
     if [ ${#lonely_list[@]} -gt 0 ]; then
-        info "本地独有分支（远端没有，会一起进包）：${lonely_list[*]}"
+        info "本地有、远端没有的分支（不会进包）：${lonely_list[*]}"
+        info "要让对面拿到，先推上去：git push $REMOTE <分支>"
+        for b in "${lonely_list[@]}"; do
+            [ "$b" = "$(current_branch)" ] || continue
+            echo
+            warn "你现在就在 $b 上，它远端没有 → 这个分支上的提交这次不会被打包"
+            info "先推：git push $REMOTE $b    （推完重跑，它就会进包）"
+        done
     fi
 
     # --- 落后：自动快进 ---
@@ -416,7 +465,7 @@ sync_remote() {
 #  pack
 # ============================================================
 cmd_pack() {
-    local dir="${1:-$MEDIA}"
+    local dir; dir=$(abspath "${1:-$MEDIA}")
     [ -d "$dir" ] || die "目录不存在：$dir
   U 盘没挂上？或者传一个目录：$ME pack /path/to/dir"
     [ -w "$dir" ] || die "目录不可写：$dir"
@@ -425,7 +474,45 @@ cmd_pack() {
     ensure_no_operation
     sync_remote
 
-    nxt "打包全部分支和标签"
+    nxt "确定打包范围"
+    # 打包范围 = 远端存在的分支（远端是唯一真相源）
+    #   本地有、远端没有 → 不打包（那是本机私货，推上去才能出去）
+    #   远端有、本地没有 → sync_remote 已经把它建成同名本地分支了，正常打包
+    local -a pack_refs=() skipped=()
+    local b
+    if has_remote && [ "$SYNC_SKIP_REMOTE" != "1" ]; then
+        while IFS= read -r b; do
+            [ -n "$b" ] || continue
+            git rev-parse --verify --quiet "refs/heads/$b" >/dev/null \
+                && pack_refs+=("refs/heads/$b")
+        done < <(remote_branches)
+        while IFS= read -r b; do
+            [ -n "$b" ] || continue
+            git rev-parse --verify --quiet "refs/remotes/$REMOTE/$b" >/dev/null \
+                || skipped+=("$b")
+        done < <(local_branches)
+    else
+        warn "没有可用的 $REMOTE（或设了 SYNC_SKIP_REMOTE=1），只能打本地全部分支"
+        while IFS= read -r b; do
+            [ -n "$b" ] || continue
+            pack_refs+=("refs/heads/$b")
+        done < <(local_branches)
+    fi
+
+    [ ${#pack_refs[@]} -gt 0 ] || die "远端一个分支都没有，没东西可打包
+  先推一个分支上去：git push $REMOTE <分支>"
+
+    info "进包分支 ${#pack_refs[@]} 条、标签 $(git for-each-ref refs/tags/ | wc -l | tr -d ' ') 个："
+    for b in "${pack_refs[@]}"; do
+        printf '        %-28s %s\n' "${b#refs/heads/}" "$(git rev-parse --short "$b")"
+    done
+    if [ ${#skipped[@]} -gt 0 ]; then
+        echo
+        warn "这些分支远端没有，本次不打包：${skipped[*]}"
+        info "要一起带走就先推：git push $REMOTE <分支>"
+    fi
+
+    nxt "打包"
     local stamp host out
     stamp=$(date +%Y%m%d-%H%M%S)
     host=$(hostname 2>/dev/null | tr -cd 'A-Za-z0-9.-')
@@ -433,12 +520,8 @@ cmd_pack() {
     out="$dir/sync-${host}-${stamp}.bundle"
     [ -e "$out" ] && die "文件已存在：$out"
 
-    local cnt; cnt=$(git for-each-ref --format='%(refname:short)' refs/heads/ | wc -l | tr -d ' ')
-    info "分支 $cnt 条、标签 $(git for-each-ref refs/tags/ | wc -l | tr -d ' ') 个"
-    git for-each-ref --format='%(refname:short)|%(objectname:short)' refs/heads/ \
-        | awk -F'|' '{printf "        %-28s %s\n", $1, $2}'
-
-    git bundle create "$out" --all >/dev/null 2>&1 || die "打包失败（bundle create）"
+    git bundle create "$out" "${pack_refs[@]}" --tags >/dev/null 2>&1 \
+        || die "打包失败（bundle create）"
     git bundle verify "$out" >/dev/null 2>&1 || die "包自校验失败，磁盘可能有问题：$out"
 
     # 校验文件固定写成 "hash  文件名"（两个空格），跨平台一致
@@ -463,7 +546,8 @@ cmd_pack() {
 # ============================================================
 # 注意：本函数在 $(...) 里跑，不能调 die（die 只会退掉子 shell，主流程会带着空路径继续）
 resolve_pkg() {
-    local src="$1" p
+    local src; src=$(abspath "$1")
+    local p
     if [ -d "$src" ]; then
         # 包名末尾自带 YYYYMMDD-HHMMSS，按它排序比 mtime 可靠：
         # 同一秒连打两个包时 mtime 会打平，ls -t 的顺序就不确定了
@@ -563,8 +647,6 @@ cmd_load() {
 
     # 1) 新建分支
     if [ ${#to_create[@]} -gt 0 ]; then
-        local first="$TARGET"
-        printf '%s\n' "${to_create[@]}" | grep -qxF "$first" || first="${to_create[0]}"
         for b in "${to_create[@]}"; do
             if ! has_commit; then
                 # 空仓库：第一个建出来的分支要 checkout，工作区才会有文件
@@ -667,6 +749,7 @@ cmd_branch() {
     git checkout -b "$name" >/dev/null 2>&1 || die "建分支失败"
     ok "已切到 $name（基于 $base）"
     info "改完：git add -A && git commit -m \"说明\""
+    info "推上去（不推不会进包）：git push $REMOTE $name"
     info "然后：$ME pack <U 盘目录>"
     info "下次运行本脚本会自动回到 $TARGET；要留在这个分支上就设 SYNC_BRANCH=$name"
     fixperm
@@ -713,11 +796,23 @@ cmd_status() {
                             "$b" "$(git rev-parse --short "refs/heads/$b")" \
                             "$(git rev-list --count "refs/remotes/$REMOTE/$b..refs/heads/$b")" ;;
             diverged)   printf '  %-28s %s  已分叉（需要手工处理）\n' "$b" "$(git rev-parse --short "refs/heads/$b")" ;;
-            local-only) printf '  %-28s %s  远端没有（会一起进包）\n' "$b" "$(git rev-parse --short "refs/heads/$b")" ;;
+            local-only) printf '  %-28s %s  远端没有（不会进包，先 git push）\n' "$b" "$(git rev-parse --short "refs/heads/$b")" ;;
         esac
     done < <(local_branches)
     [ "$any" = "1" ] || info "（还没有任何分支）"
     [ "$fetched" = "1" ] || info "（远端状态未刷新）"
+
+    # 远端有、本地还没有的分支：pack/load/branch 任意一个命令跑下去就会自动建出来
+    local rb shown_r=0
+    while IFS= read -r rb; do
+        [ -n "$rb" ] || continue
+        git rev-parse --verify --quiet "refs/heads/$rb" >/dev/null && continue
+        if [ "$shown_r" = "0" ]; then
+            info "远端有、本地还没有（运行任一命令会自动拉下来）："
+            shown_r=1
+        fi
+        printf '  %-28s %s\n' "$rb" "$(git rev-parse --short "refs/remotes/$REMOTE/$rb")"
+    done < <(remote_branches)
 
     sec "工作区"
     local n u
@@ -761,18 +856,20 @@ $ME — 不通网的两台机器之间同步整个仓库（不分 A/B，两端�
 $head
 
 命令（都可以在任何目录执行，仓库自动找）：
-  $ME pack   [目录]       打包全部分支和标签到 U 盘（默认 $MEDIA）
+  $ME pack   [目录]       打包「远端存在的」分支和标签（默认 $MEDIA）
   $ME load   [包或目录]    收下对面的包，逐分支快进（默认从 $MEDIA 找最新包）
   $ME status              看状态（只读）
   $ME branch <名字>        开工作分支 b/<名字> 并切过去
   $ME fixperm             $fixline
   $ME -r <仓库> <命令>      临时指定仓库目录
 
-每次运行都会先和 $REMOTE 对齐：落后自动快进，领先/分叉停下等人处理。
+每次运行都会先和 $REMOTE 对齐：落后自动快进，领先/分叉停下等人处理；
+远端有、本地没有的分支自动拉下来，本地有、远端没有的分支不会进包。
 结束时停回你运行前所在的分支；env 里写 SYNC_BRANCH=xxx 就停在它上面。
 
 日常一圈（谁改都一样，没有先后之分）：
-  改代码的一端：  git add -A && git commit -m "说明"   →   $ME pack /media/usb/toB
+  改代码的一端：  git add -A && git commit -m "说明" && git push $REMOTE <分支>
+                  →   $ME pack /media/usb/toB
   收包的一端：    $ME load /media/usb/toB
 
 配置（$ENV_FILE）：
