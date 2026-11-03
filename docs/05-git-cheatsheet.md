@@ -179,7 +179,35 @@ git switch feature/xxx        # 看完切回来
 
 ---
 
-## 11. 提速（SMB / 大目录下必做）
+## 11. 断网同步（`sync.sh`）相关
+
+脚本已经把这些包成一条命令，但知道底下是什么命令，出问题才好查。
+
+| 我想 | 直接用 git | 用脚本 |
+|---|---|---|
+| 打全量包 | `git bundle create x.bundle --all` | `sync.sh pack /media/usb/toB` |
+| 看包里有什么 | `git bundle list-heads x.bundle` | —— |
+| 校验包 | `git bundle verify x.bundle` | `sync.sh load` 会自动做 |
+| 把包读成本地分支 | `git fetch x.bundle "+refs/heads/*:refs/remotes/peer/*"` | `sync.sh load` |
+| 把某分支对到包里那版 | `git merge --ff-only peer/dev` | `sync.sh load` |
+| 把本地提交接到包里那版后面 | `git rebase peer/dev` | —— |
+| 把更新推给本机 Gitea | `git push origin dev` | `sync.sh load` 结束时自动做 |
+
+**分叉之后的标准动作**（两边都改过同一分支时）：
+
+```bash
+git switch dev
+git rebase origin/dev        # 或 peer/dev（对面是包里的那份）
+# 有冲突：改文件 → git add -A → git rebase --continue
+git push --force-with-lease origin dev    # rebase 改写过历史，普通 push 会被拒
+```
+
+> `--force-with-lease` 和 `--force` 的区别：前者会先检查远端有没有你没见过的新提交，有就拒绝。
+> **自己一个人的仓库也是它更安全**——别人（或另一个你自己）刚推过东西时不会被你悄悄盖掉。
+
+---
+
+## 12. 提速（SMB / 大目录下必做）
 
 ```bash
 # 本地忽略清单：不进版本库、不影响任何人

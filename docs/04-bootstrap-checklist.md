@@ -21,12 +21,8 @@
 
 ### 同步范围
 
-| 分支 | 在 A 侧 | 在 B 侧 | 说明 |
-|---|:--:|:--:|---|
-| `dev` | 主线开发 | ✅ 跟 A 走 | **唯一要同步的分支** |
-| `uat` / `main` | 备份 | ❌ 不进 B | 只在 A 侧保留，B 不碰 |
-
-只同步一条分支的好处：B 端永远不会因为分支跑偏而出错，包也更小。
+**全部同步。** `dev`、`uat`、`main`、`feature/x`、`b/xxx` 以及标签都会过去，两端保持一致。
+不再需要选"只同步哪条分支"，也不需要区分 A 端 B 端——两边完全对等。
 
 ---
 
@@ -103,19 +99,20 @@ sudo docker inspect "$G" --format '{{range .Mounts}}{{.Type}}  {{.Source}} -> {{
 
 ---
 
-## 阶段 2 · 把 A 的 `dev` 搬进 B（U 盘摆渡）
+## 阶段 2 · 把 A 的仓库搬进 B（U 盘摆渡）
 
-全程靠 U 盘搬两个文件。**顺序不能反**：先 A 打包，再 B 导入。
+全程靠 U 盘搬两个文件。这一段**手敲命令**，用于脚本还没装、或想确认底层到底发生了什么。
+**顺序不能反**：先 A 打包，再 B 导入。
 
-### 2.1 A 端打一个 `dev` 包裹
+> 脚本装好之后（阶段 3），同样的活只要 `sync.sh pack` / `sync.sh load` 两条命令，这一段可以跳过。
+
+### 2.1 A 端打一个全量包裹
 
 在 A 端宿主机：
 
 ```bash
 cd /srv/project
 git rev-parse --show-toplevel        # 输出应该就是这个路径
-git switch dev
-git branch --show-current            # 必须输出 dev
 ```
 
 先确认没有"改了但没提交"的内容（**未跟踪文件不影响，不用管**）：
@@ -126,11 +123,11 @@ git status --porcelain | grep -v '^??' || echo "干净"
 
 有输出（形如 ` M models/xxx.py`）就先提交或 stash，否则 B 端拿到的是不含这些改动的版本。
 
-打包：
+打包（`--all` = 所有本地分支 + 标签）：
 
 ```bash
 B=$(date +%Y%m%d)
-git bundle create /tmp/fromA-$B.bundle dev
+git bundle create /tmp/fromA-$B.bundle --all
 git bundle list-heads /tmp/fromA-$B.bundle
 ls -lh /tmp/fromA-$B.bundle
 cd /tmp && sha256sum fromA-$B.bundle > fromA-$B.bundle.sha256 && cat fromA-$B.bundle.sha256
@@ -138,7 +135,7 @@ cd /tmp && sha256sum fromA-$B.bundle > fromA-$B.bundle.sha256 && cat fromA-$B.bu
 
 **✅ 通过标准**：
 
-1. `list-heads` **只输出一行** `refs/heads/dev`
+1. `list-heads` 输出**每一条本地分支**（`refs/heads/dev`、`refs/heads/uat`…），以及标签
 2. `ls -lh` 有文件大小
 3. `cat` 打出一串 64 位十六进制
 
@@ -165,10 +162,9 @@ sha256sum -c fromA-20261030.bundle.sha256
 # 1) 从包裹建临时裸库
 git clone --bare fromA-20261030.bundle /tmp/relay.git
 
-# 2) 只推 dev 进 B 的 Gitea
-git --git-dir=/tmp/relay.git push \
-  http://192.168.1.50:3000/gituser/myproject.git \
-  refs/heads/dev:refs/heads/dev
+# 2) 把所有分支和标签一起推给 B 的 Gitea
+git --git-dir=/tmp/relay.git push --all --tags \
+  http://192.168.1.50:3000/gituser/myproject.git
 
 # 3) 清临时库
 rm -rf /tmp/relay.git
@@ -177,10 +173,10 @@ rm -rf /tmp/relay.git
 cd ~ && git clone http://192.168.1.50:3000/gituser/myproject.git myproject
 
 # 5) 确认
-cd ~/myproject && git log --oneline -3 && git branch -vv
+cd ~/myproject && git log --oneline -3 && git branch -a
 ```
 
-**✅ 通过标准**：第 5 步打印出提交记录，且 `git branch -vv` 显示 `* dev`。
+**✅ 通过标准**：第 5 步打印出提交记录，`git branch -a` 能看到 A 端所有的分支（`dev`、`uat`、`main`…）。
 
 ### 2.4 把默认分支改成 dev
 
@@ -192,13 +188,13 @@ Gitea 新建空库时默认分支名常是 `main`，而我们只推了 `dev`，�
 
 ### 2.5 知道这一步搬了什么、没搬什么
 
-**搬了**：所有提交过的代码。
+**搬了**：所有分支的提交、所有标签。
 
 **没搬**：
 
 - 未跟踪的文件（数据文件、本地配置、产物目录）
-- `.git` 里的 stash、reflog
-- 其他分支
+- `.git` 里的 stash、reflog、远端跟踪分支
+- 工作区里没提交的改动
 
 代码落地后，如果 B 端要真正跑起来还缺数据文件，得单独处理（通常几百 MB 到几 GB，U 盘或移动硬盘直接拷比任何传输方式都快）。
 
@@ -209,39 +205,42 @@ Gitea 新建空库时默认分支名常是 `main`，而我们只推了 `dev`，�
 脚本放**仓库外面**的固定目录，配置就放它旁边：
 
 ```bash
-mkdir -p /devsdb/git-sync
-cp sync.sh /devsdb/git-sync/sync.sh
-chmod +x /devsdb/git-sync/sync.sh
+mkdir -p ~/git-sync
+cp sync.sh ~/git-sync/sync.sh
+chmod +x ~/git-sync/sync.sh
 ```
 
-写配置（B 端）：
+写配置：
 
 ```bash
-cat > /devsdb/git-sync/.sync.env <<'EOF'
-SYNC_ROLE=B
+cat > ~/git-sync/.sync.env <<'EOF'
 SYNC_BRANCH=dev
-SYNC_MERGE_INTO=dev
 SYNC_REPO=/data/project
 SYNC_MEDIA=/media/usb
+SYNC_PERM=777
 EOF
 ```
 
 自检：
 
 ```bash
-/devsdb/git-sync/sync.sh status
+~/git-sync/sync.sh status
 ```
 
-**✅ 通过标准**：输出里能看到这三行
+**✅ 通过标准**：输出里能看到这几行
 
 ```
-      角色 : B
-      同步 : 分支 dev，B 的提案落到 dev
+      配置 : ~/git-sync/.sync.env
+      停留 : dev  ← SYNC_BRANCH 指定
       权限 : 777    filemode=false
+
+  分支与远端
+  dev                          a9e3860  与远端一致
 ```
 
-`角色` 空着说明 `SYNC_ROLE` 没读进去；`落点` 不是 `dev` 说明 `SYNC_MERGE_INTO` 没生效
-（原因通常是配置文件放错位置，或者变量名漏了 `SYNC_` 前缀）。
+`配置` 那行路径不对，说明 `.sync.env` 没跟脚本放一个目录；
+`停留` 不是 `dev` 说明 `SYNC_BRANCH` 没读进去（多为变量名漏了 `SYNC_` 前缀）；
+`分支与远端` 全是 `落后` 就再跑一次 `sync.sh status`，它会自动 fetch 后重算。
 
 之后日常操作见 [02 · 双端同步](02-two-way-sync.md)。
 
@@ -249,9 +248,8 @@ EOF
 
 ## 三条铁律
 
-1. **B 端永远不在同步分支上直接改代码。** 要改就开 `b/1103-修个bug` 这种分支，由 A 端合并。
-   （同步 `uat` 时同理：在 `uat` 上直接改会绕过 `dev`，写 `SYNC_ROLE=B` 时 `pack` 会直接拦住。）
-2. **合并只在 A 端做。** 两边都 merge 会生成两个不同 sha 的合并提交，历史永久分叉，再也对不上。
+1. **改代码先 `sync.sh branch <名字>`。** 两边都在 `dev` 上直接攒提交，一搬就分叉，得手工 rebase。
+2. **本地要和本机 Gitea 一致。** 有没推送的提交时同步命令会停下来——先 `git push`，或确认"就是要带走"再加 `SYNC_ALLOW_LOCAL_AHEAD=1`。
 3. **每次搬代码都带 sha256 校验。** 别直接拷文件夹，别信"应该没坏"。
 
 ---
